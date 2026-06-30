@@ -427,11 +427,11 @@ C. C++
 D. Semua benar`}
                   </pre>
                   <a
-                    href="/template-guide.txt"
-                    download
-                    className="inline-block mt-2 text-blue-600 hover:text-blue-800 font-medium"
+                    href="/api/template"
+                    download="Template_Soal_Quiz.docx"
+                    className="inline-block mt-2 px-4 py-2 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700 transition-colors"
                   >
-                    Download Template Guide →
+                    Download Template Word (.docx)
                   </a>
                 </div>
               </details>
