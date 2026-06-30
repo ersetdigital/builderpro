@@ -53,7 +53,7 @@ export async function createGoogleForm(
   // Step 3: Add questions
   const questionRequests = questions.map((q, index) => {
     const options = q.options.map((opt) => ({
-      value: `${opt.label}. ${opt.text}`,
+      value: opt.text,
     }));
 
     const correctIndex = q.options.findIndex(
