@@ -1,4 +1,4 @@
-import mammoth from "mammoth";
+import JSZip from "jszip";
 
 export interface ParsedQuestion {
   number: number;
@@ -12,15 +12,29 @@ export interface ParseResult {
   errors: string[];
 }
 
+interface Paragraph {
+  text: string;
+  isBold: boolean;
+}
+
 /**
- * Parses a DOCX buffer and extracts quiz questions.
+ * Parse a DOCX file by reading the XML directly.
+ * A .docx is a ZIP containing word/document.xml.
+ * This gives us full control over text and formatting detection.
  */
 export async function parseDocx(buffer: Buffer): Promise<ParseResult> {
-  const htmlResult = await mammoth.convertToHtml({ buffer });
-  const html = htmlResult.value;
+  const zip = await JSZip.loadAsync(buffer);
+  const docXml = await zip.file("word/document.xml")?.async("string");
 
-  const items = flattenHtml(html);
-  const questions = groupItems(items);
+  if (!docXml) {
+    return { questions: [], errors: ["Could not read document.xml from the DOCX file."] };
+  }
+
+  // Extract paragraphs with their text and bold status
+  const paragraphs = extractParagraphs(docXml);
+
+  // Parse into questions
+  const questions = parseQuestions(paragraphs);
 
   const errors: string[] = [];
   const valid: ParsedQuestion[] = [];
@@ -39,181 +53,163 @@ export async function parseDocx(buffer: Buffer): Promise<ParseResult> {
   return { questions: valid, errors };
 }
 
-interface FlatItem {
-  text: string;
-  isBold: boolean;
-  depth: number;
-}
+/**
+ * Extract paragraphs from the DOCX XML.
+ * Each <w:p> is a paragraph. Inside it, <w:r> are runs of text.
+ * Bold is indicated by <w:b/> or <w:b w:val="true"/> in <w:rPr>.
+ */
+function extractParagraphs(xml: string): Paragraph[] {
+  const paragraphs: Paragraph[] = [];
 
-function flattenHtml(html: string): FlatItem[] {
-  const items: FlatItem[] = [];
-  let depth = 0;
-  let buffer = "";
+  // Split by paragraph tags
+  const pMatches = xml.match(/<w:p[ >][\s\S]*?<\/w:p>/g);
+  if (!pMatches) return [];
 
-  const parts = html.split(/(<[^>]+>)/);
+  for (const pXml of pMatches) {
+    // Check for paragraph-level bold (in pPr > rPr)
+    const pPrBold = hasParagraphBold(pXml);
 
-  for (const part of parts) {
-    if (!part) continue;
+    // Extract all runs in this paragraph
+    const runs = pXml.match(/<w:r[ >][\s\S]*?<\/w:r>/g);
+    if (!runs) continue;
 
-    if (part.startsWith("<")) {
-      const lower = part.toLowerCase();
+    let paragraphText = "";
+    let boldCharCount = 0;
+    let totalCharCount = 0;
 
-      if (lower.startsWith("<ol") || lower.startsWith("<ul")) {
-        depth++;
-      } else if (lower === "</ol>" || lower === "</ul>") {
-        depth = Math.max(0, depth - 1);
-      } else if (lower.startsWith("<li")) {
-        flushBuffer(buffer, depth, items);
-        buffer = "";
-      } else if (lower === "</li>") {
-        flushBuffer(buffer, depth, items);
-        buffer = "";
-      } else if (lower.startsWith("<p")) {
-        flushBuffer(buffer, depth, items);
-        buffer = "";
-      } else if (lower === "</p>") {
-        flushBuffer(buffer, depth, items);
-        buffer = "";
-      } else {
-        buffer += part;
-      }
-    } else {
-      buffer += part;
+    for (const run of runs) {
+      // Get text from <w:t> tags
+      const textMatches = run.match(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g);
+      if (!textMatches) continue;
+
+      const runText = textMatches
+        .map((t) => t.replace(/<[^>]+>/g, ""))
+        .join("");
+
+      if (!runText) continue;
+
+      // Check if this run is bold
+      const runIsBold = pPrBold || isRunBold(run);
+
+      paragraphText += runText;
+      totalCharCount += runText.length;
+      if (runIsBold) boldCharCount += runText.length;
+    }
+
+    const text = paragraphText.trim();
+    if (text) {
+      const isBold = totalCharCount > 0 && boldCharCount >= totalCharCount * 0.5;
+      paragraphs.push({ text, isBold });
     }
   }
 
-  flushBuffer(buffer, depth, items);
-  return items;
-}
-
-function flushBuffer(buffer: string, depth: number, items: FlatItem[]) {
-  const text = buffer.replace(/<[^>]+>/g, "").trim();
-  if (!text) return;
-  const isBold = checkBold(buffer);
-  items.push({ text, isBold, depth });
-}
-
-function checkBold(html: string): boolean {
-  const text = html.replace(/<[^>]+>/g, "").trim();
-  if (!text) return false;
-  const boldRegex = /<strong>([\s\S]*?)<\/strong>|<b>([\s\S]*?)<\/b>/gi;
-  let boldText = "";
-  let match;
-  while ((match = boldRegex.exec(html)) !== null) {
-    boldText += (match[1] || match[2] || "").replace(/<[^>]+>/g, "");
-  }
-  return boldText.trim().length >= text.length * 0.5;
+  return paragraphs;
 }
 
 /**
- * Group items into questions by detecting question patterns.
- * 
- * Strategy: A question is any item that:
- * - Ends with : or ? 
- * - OR matches "N. <text>" pattern (paragraph question)
- * - OR is long text (>40 chars) followed by short items
- * 
- * After a question, the next 4 (or up to 6) items are its options,
- * UNTIL we hit another question.
+ * Check if a run (<w:r>) has bold formatting.
  */
-function groupItems(items: FlatItem[]): ParsedQuestion[] {
+function isRunBold(runXml: string): boolean {
+  // Look for <w:rPr> containing <w:b/> or <w:b w:val="1"/> or <w:b w:val="true"/>
+  const rPrMatch = runXml.match(/<w:rPr>([\s\S]*?)<\/w:rPr>/);
+  if (!rPrMatch) return false;
+
+  const rPr = rPrMatch[1];
+
+  // <w:b/> or <w:b w:val="..."/> (where val is not "0" or "false")
+  if (/<w:b\/>/.test(rPr)) return true;
+  if (/<w:b\s+w:val="0"/.test(rPr)) return false;
+  if (/<w:b\s+w:val="false"/.test(rPr)) return false;
+  if (/<w:b[\s>]/.test(rPr)) return true;
+
+  return false;
+}
+
+/**
+ * Check if a paragraph has bold set at the paragraph level (pPr > rPr > b).
+ */
+function hasParagraphBold(pXml: string): boolean {
+  const pPrMatch = pXml.match(/<w:pPr>([\s\S]*?)<\/w:pPr>/);
+  if (!pPrMatch) return false;
+
+  const pPr = pPrMatch[1];
+  const rPrMatch = pPr.match(/<w:rPr>([\s\S]*?)<\/w:rPr>/);
+  if (!rPrMatch) return false;
+
+  const rPr = rPrMatch[1];
+  if (/<w:b\/>/.test(rPr)) return true;
+  if (/<w:b\s+w:val="0"/.test(rPr)) return false;
+  if (/<w:b\s+w:val="false"/.test(rPr)) return false;
+  if (/<w:b[\s>]/.test(rPr)) return true;
+
+  return false;
+}
+
+/**
+ * Parse paragraphs into questions.
+ * Simple and reliable: look for numbered lines as questions,
+ * lettered lines as options.
+ */
+function parseQuestions(paragraphs: Paragraph[]): ParsedQuestion[] {
   const questions: ParsedQuestion[] = [];
-  const optLabels = ["A", "B", "C", "D", "E", "F"];
-  let questionNum = 0;
+  let currentQuestion: { number: number; question: string } | null = null;
+  let currentOptions: { label: string; text: string; isBold: boolean }[] = [];
 
-  let i = 0;
-  while (i < items.length) {
-    const item = items[i];
+  for (const para of paragraphs) {
+    const text = para.text.trim();
+    if (!text) continue;
 
-    // Check if this item is a question
-    if (isQuestion(item, items, i)) {
-      questionNum++;
+    // Match question: starts with number + . or )
+    const questionMatch = text.match(/^(\d+)[.)]\s*(.*)/);
+    // Match option: starts with a-d/A-D + . or )
+    const optionMatch = text.match(/^([A-Da-d])[.)]\s*(.*)/);
 
-      // Check if it's a numbered paragraph question like "7. Standart..."
-      let qText = item.text;
-      const numMatch = qText.match(/^(\d+)[.)]\s*(.+)/);
-      if (numMatch) {
-        questionNum = parseInt(numMatch[1]);
-        qText = numMatch[2];
+    if (optionMatch && currentQuestion) {
+      // This is an option
+      const label = optionMatch[1].toUpperCase();
+      const optText = optionMatch[2].trim();
+      currentOptions.push({ label, text: optText, isBold: para.isBold });
+    } else if (questionMatch) {
+      // Save previous question
+      if (currentQuestion) {
+        finalizeQuestion(currentQuestion, currentOptions, questions);
       }
 
-      // Collect options: next items until another question or max 6
-      const options: { label: string; text: string; isBold: boolean }[] = [];
-      let j = i + 1;
+      const qNum = parseInt(questionMatch[1]);
+      const qText = questionMatch[2].trim();
 
-      while (j < items.length && options.length < 6) {
-        const next = items[j];
+      // Skip empty question text (like stray "7." at end of soal 6)
+      if (!qText) continue;
 
-        // If this next item is also a question, stop collecting options
-        if (options.length >= 2 && isQuestion(next, items, j)) {
-          break;
-        }
-
-        options.push({
-          label: optLabels[options.length],
-          text: next.text,
-          isBold: next.isBold,
-        });
-        j++;
-      }
-
-      const correctAnswer = options.find((o) => o.isBold)?.label || null;
-
-      // Only add if we have at least 2 options (otherwise it's not a real question)
-      if (options.length >= 2) {
-        questions.push({
-          number: questionNum,
-          question: qText,
-          options,
-          correctAnswer,
-        });
-      }
-
-      i = j;
-    } else {
-      i++;
+      currentQuestion = { number: qNum, question: qText };
+      currentOptions = [];
+    } else if (currentQuestion && currentOptions.length === 0) {
+      // Continuation of question text
+      currentQuestion.question += " " + text;
     }
+  }
+
+  // Last question
+  if (currentQuestion) {
+    finalizeQuestion(currentQuestion, currentOptions, questions);
   }
 
   return questions;
 }
 
-/**
- * Determine if an item is a question.
- */
-function isQuestion(item: FlatItem, items: FlatItem[], index: number): boolean {
-  const text = item.text;
+function finalizeQuestion(
+  q: { number: number; question: string },
+  options: { label: string; text: string; isBold: boolean }[],
+  questions: ParsedQuestion[]
+) {
+  if (options.length === 0) return;
 
-  // Numbered paragraph "7. Standart Tegangan..."
-  const numMatch = text.match(/^(\d+)[.)]\s*(.+)/);
-  if (numMatch && numMatch[2].length > 5) {
-    return true;
-  }
+  const correctAnswer = options.find((o) => o.isBold)?.label || null;
 
-  // Ends with colon or question mark — strong indicator
-  if (text.endsWith(":") || text.endsWith("?")) {
-    return true;
-  }
-
-  // Contains question keywords AND is reasonably long
-  const keywords = ["adalah", "berikut", "kecuali", "merupakan", "terletak", "sesuai", "mempunyai", "terdiri"];
-  const hasKeyword = keywords.some((kw) => text.toLowerCase().includes(kw));
-  if (hasKeyword && text.length > 20) {
-    return true;
-  }
-
-  // Long text followed by at least 3 shorter items
-  if (text.length > 40) {
-    let shortFollowers = 0;
-    for (let k = index + 1; k < Math.min(index + 5, items.length); k++) {
-      if (items[k].text.length < text.length) {
-        shortFollowers++;
-      } else {
-        break;
-      }
-    }
-    if (shortFollowers >= 3) return true;
-  }
-
-  return false;
+  questions.push({
+    number: q.number,
+    question: q.question,
+    options,
+    correctAnswer,
+  });
 }
