@@ -14,177 +14,206 @@ export interface ParseResult {
 
 /**
  * Parses a DOCX buffer and extracts quiz questions.
- * Uses both raw text (for reliable structure) and HTML (for bold detection).
  */
 export async function parseDocx(buffer: Buffer): Promise<ParseResult> {
-  // Get HTML for bold detection
   const htmlResult = await mammoth.convertToHtml({ buffer });
   const html = htmlResult.value;
 
-  // Get raw text — mammoth extractRawText preserves list numbering
-  const textResult = await mammoth.extractRawText({ buffer });
-  const rawText = textResult.value;
+  const items = flattenHtml(html);
+  const questions = groupItems(items);
 
-  // Extract all bold text snippets from HTML
-  const boldTexts = extractAllBoldTexts(html);
+  const errors: string[] = [];
+  const valid: ParsedQuestion[] = [];
 
-  // Parse questions from raw text
-  const parsed = parseRawText(rawText, boldTexts);
+  for (const q of questions) {
+    if (q.options.length === 0) {
+      errors.push(`Soal nomor ${q.number} tidak dapat diproses.`);
+      continue;
+    }
+    if (!q.correctAnswer) {
+      errors.push(`Soal nomor ${q.number} tidak memiliki kunci jawaban.`);
+    }
+    valid.push(q);
+  }
 
-  return parsed;
+  return { questions: valid, errors };
 }
 
-/**
- * Parse the raw text from mammoth into questions.
- * Raw text from mammoth includes the text content of list items in order,
- * separated by newlines, but WITHOUT the numbering/lettering from Word lists.
- * 
- * However, based on actual testing, mammoth extractRawText DOES include
- * content in reading order. We need to figure out which lines are questions
- * and which are options based on the document's content patterns.
- */
-function parseRawText(rawText: string, boldTexts: string[]): ParseResult {
-  const lines = rawText
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
+interface FlatItem {
+  text: string;
+  isBold: boolean;
+  depth: number;
+}
 
-  const questions: ParsedQuestion[] = [];
-  const errors: string[] = [];
+function flattenHtml(html: string): FlatItem[] {
+  const items: FlatItem[] = [];
+  let depth = 0;
+  let buffer = "";
 
-  let currentQuestion: { number: number; question: string } | null = null;
-  let currentOptions: { label: string; text: string; isBold: boolean }[] = [];
-  const optLabels = ["A", "B", "C", "D", "E", "F"];
+  const parts = html.split(/(<[^>]+>)/);
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+  for (const part of parts) {
+    if (!part) continue;
 
-    // Check for explicit question pattern: "1." "2." etc
-    const questionMatch = line.match(/^(\d+)[.)]\s*(.*)/);
-    // Check for explicit option pattern: "a." "b." "A." "B." etc
-    const optionMatch = line.match(/^([A-Da-d])[.)]\s*(.*)/);
+    if (part.startsWith("<")) {
+      const lower = part.toLowerCase();
 
-    if (optionMatch) {
-      // Explicit option
-      if (currentQuestion) {
-        const label = optionMatch[1].toUpperCase();
-        const text = optionMatch[2].trim();
-        const isBold = isTextInBoldList(text, boldTexts) || isTextInBoldList(`${optionMatch[1]}. ${text}`, boldTexts);
-        currentOptions.push({ label, text, isBold });
+      if (lower.startsWith("<ol") || lower.startsWith("<ul")) {
+        depth++;
+      } else if (lower === "</ol>" || lower === "</ul>") {
+        depth = Math.max(0, depth - 1);
+      } else if (lower.startsWith("<li")) {
+        flushBuffer(buffer, depth, items);
+        buffer = "";
+      } else if (lower === "</li>") {
+        flushBuffer(buffer, depth, items);
+        buffer = "";
+      } else if (lower.startsWith("<p")) {
+        flushBuffer(buffer, depth, items);
+        buffer = "";
+      } else if (lower === "</p>") {
+        flushBuffer(buffer, depth, items);
+        buffer = "";
+      } else {
+        buffer += part;
       }
-    } else if (questionMatch) {
-      const qNum = parseInt(questionMatch[1]);
-      const qText = questionMatch[2].trim();
-
-      // Edge case: "7." alone at end of soal 6 — skip empty question text
-      if (!qText || qText.length === 0) {
-        continue;
-      }
-
-      // Save previous question
-      if (currentQuestion) {
-        finalize(currentQuestion, currentOptions, questions, errors);
-      }
-
-      currentQuestion = { number: qNum, question: qText };
-      currentOptions = [];
     } else {
-      // Line without explicit prefix
-      // If we have a current question and no options yet, this might be question continuation
-      // If we have options already, this might be a stray option without prefix
-      if (currentQuestion && currentOptions.length === 0) {
-        // Append to question text
-        currentQuestion.question += " " + line;
-      } else if (currentQuestion && currentOptions.length > 0) {
-        // After options started, a line without prefix is unusual
-        // Could be continuation of last option or a new option without letter
-        // For now, treat as additional option
-        const label = optLabels[currentOptions.length] || "?";
-        const isBold = isTextInBoldList(line, boldTexts);
-        currentOptions.push({ label, text: line, isBold });
-      }
+      buffer += part;
     }
   }
 
-  // Last question
-  if (currentQuestion) {
-    finalize(currentQuestion, currentOptions, questions, errors);
-  }
-
-  return { questions, errors };
+  flushBuffer(buffer, depth, items);
+  return items;
 }
 
-function finalize(
-  q: { number: number; question: string },
-  options: { label: string; text: string; isBold: boolean }[],
-  questions: ParsedQuestion[],
-  errors: string[]
-) {
-  if (options.length === 0) {
-    errors.push(`Soal nomor ${q.number} tidak dapat diproses.`);
-    return;
-  }
+function flushBuffer(buffer: string, depth: number, items: FlatItem[]) {
+  const text = buffer.replace(/<[^>]+>/g, "").trim();
+  if (!text) return;
+  const isBold = checkBold(buffer);
+  items.push({ text, isBold, depth });
+}
 
-  let correctAnswer: string | null = null;
-  const boldOpts = options.filter((o) => o.isBold);
-  if (boldOpts.length > 0) {
-    correctAnswer = boldOpts[0].label;
+function checkBold(html: string): boolean {
+  const text = html.replace(/<[^>]+>/g, "").trim();
+  if (!text) return false;
+  const boldRegex = /<strong>([\s\S]*?)<\/strong>|<b>([\s\S]*?)<\/b>/gi;
+  let boldText = "";
+  let match;
+  while ((match = boldRegex.exec(html)) !== null) {
+    boldText += (match[1] || match[2] || "").replace(/<[^>]+>/g, "");
   }
-
-  questions.push({
-    number: q.number,
-    question: q.question,
-    options,
-    correctAnswer,
-  });
+  return boldText.trim().length >= text.length * 0.5;
 }
 
 /**
- * Check if a text is contained in the bold texts list.
- * Uses fuzzy matching to handle minor differences.
+ * Group items into questions by detecting question patterns.
+ * 
+ * Strategy: A question is any item that:
+ * - Ends with : or ? 
+ * - OR matches "N. <text>" pattern (paragraph question)
+ * - OR is long text (>40 chars) followed by short items
+ * 
+ * After a question, the next 4 (or up to 6) items are its options,
+ * UNTIL we hit another question.
  */
-function isTextInBoldList(text: string, boldTexts: string[]): boolean {
-  const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
-  if (!normalized || normalized.length < 2) return false;
+function groupItems(items: FlatItem[]): ParsedQuestion[] {
+  const questions: ParsedQuestion[] = [];
+  const optLabels = ["A", "B", "C", "D", "E", "F"];
+  let questionNum = 0;
 
-  for (const bold of boldTexts) {
-    const boldNorm = bold.toLowerCase().replace(/\s+/g, " ").trim();
-    if (!boldNorm) continue;
+  let i = 0;
+  while (i < items.length) {
+    const item = items[i];
 
-    // Exact match
-    if (boldNorm === normalized) return true;
+    // Check if this item is a question
+    if (isQuestion(item, items, i)) {
+      questionNum++;
 
-    // Bold contains the option text
-    if (boldNorm.length > 3 && normalized.includes(boldNorm)) return true;
+      // Check if it's a numbered paragraph question like "7. Standart..."
+      let qText = item.text;
+      const numMatch = qText.match(/^(\d+)[.)]\s*(.+)/);
+      if (numMatch) {
+        questionNum = parseInt(numMatch[1]);
+        qText = numMatch[2];
+      }
 
-    // Option text contains the bold text
-    if (normalized.length > 3 && boldNorm.includes(normalized)) return true;
+      // Collect options: next items until another question or max 6
+      const options: { label: string; text: string; isBold: boolean }[] = [];
+      let j = i + 1;
 
-    // Match without trailing punctuation
-    const normNoPunct = normalized.replace(/[.,;:!?]+$/, "").trim();
-    const boldNoPunct = boldNorm.replace(/[.,;:!?]+$/, "").trim();
-    if (normNoPunct === boldNoPunct) return true;
-    if (normNoPunct.length > 3 && boldNoPunct.includes(normNoPunct)) return true;
-    if (boldNoPunct.length > 3 && normNoPunct.includes(boldNoPunct)) return true;
+      while (j < items.length && options.length < 6) {
+        const next = items[j];
+
+        // If this next item is also a question, stop collecting options
+        if (options.length >= 2 && isQuestion(next, items, j)) {
+          break;
+        }
+
+        options.push({
+          label: optLabels[options.length],
+          text: next.text,
+          isBold: next.isBold,
+        });
+        j++;
+      }
+
+      const correctAnswer = options.find((o) => o.isBold)?.label || null;
+
+      // Only add if we have at least 2 options (otherwise it's not a real question)
+      if (options.length >= 2) {
+        questions.push({
+          number: questionNum,
+          question: qText,
+          options,
+          correctAnswer,
+        });
+      }
+
+      i = j;
+    } else {
+      i++;
+    }
+  }
+
+  return questions;
+}
+
+/**
+ * Determine if an item is a question.
+ */
+function isQuestion(item: FlatItem, items: FlatItem[], index: number): boolean {
+  const text = item.text;
+
+  // Numbered paragraph "7. Standart Tegangan..."
+  const numMatch = text.match(/^(\d+)[.)]\s*(.+)/);
+  if (numMatch && numMatch[2].length > 5) {
+    return true;
+  }
+
+  // Ends with colon or question mark — strong indicator
+  if (text.endsWith(":") || text.endsWith("?")) {
+    return true;
+  }
+
+  // Contains question keywords AND is reasonably long
+  const keywords = ["adalah", "berikut", "kecuali", "merupakan", "terletak", "sesuai", "mempunyai", "terdiri"];
+  const hasKeyword = keywords.some((kw) => text.toLowerCase().includes(kw));
+  if (hasKeyword && text.length > 20) {
+    return true;
+  }
+
+  // Long text followed by at least 3 shorter items
+  if (text.length > 40) {
+    let shortFollowers = 0;
+    for (let k = index + 1; k < Math.min(index + 5, items.length); k++) {
+      if (items[k].text.length < text.length) {
+        shortFollowers++;
+      } else {
+        break;
+      }
+    }
+    if (shortFollowers >= 3) return true;
   }
 
   return false;
-}
-
-/**
- * Extract all bold text segments from HTML.
- */
-function extractAllBoldTexts(html: string): string[] {
-  const boldTexts: string[] = [];
-  const regex = /<strong>([\s\S]*?)<\/strong>|<b>([\s\S]*?)<\/b>/gi;
-  let match;
-
-  while ((match = regex.exec(html)) !== null) {
-    const text = (match[1] || match[2] || "").replace(/<[^>]+>/g, "").trim();
-    if (text && text.length > 1) {
-      boldTexts.push(text);
-    }
-  }
-
-  return boldTexts;
 }
