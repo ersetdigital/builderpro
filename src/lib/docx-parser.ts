@@ -14,13 +14,13 @@ export interface ParseResult {
 
 /**
  * Parses a DOCX buffer and extracts quiz questions.
- * Handles multiple HTML structures produced by mammoth from Word docs.
+ * Works by parsing the HTML tree structure from mammoth.
  */
 export async function parseDocx(buffer: Buffer): Promise<ParseResult> {
   const htmlResult = await mammoth.convertToHtml({ buffer });
   const html = htmlResult.value;
 
-  const questions = parseFromHtml(html);
+  const questions = parseHtmlToQuestions(html);
   const errors: string[] = [];
   const validQuestions: ParsedQuestion[] = [];
 
@@ -40,231 +40,297 @@ export async function parseDocx(buffer: Buffer): Promise<ParseResult> {
   return { questions: validQuestions, errors };
 }
 
-/**
- * Parse questions from mammoth HTML output.
- * Strategy: flatten all content into sequential items, then group into questions.
- */
-function parseFromHtml(html: string): ParsedQuestion[] {
-  // Step 1: Extract all content items in order with their properties
-  const items = extractItems(html);
+interface Node {
+  type: "element" | "text";
+  tag?: string;
+  children?: Node[];
+  text?: string;
+  html?: string;
+}
 
-  // Step 2: Group items into questions
-  const questions = groupIntoQuestions(items);
+/**
+ * Simple HTML parser to build a tree structure.
+ */
+function parseHtmlTree(html: string): Node[] {
+  const nodes: Node[] = [];
+  const stack: Node[] = [];
+
+  // Split into tags and text
+  const regex = /(<\/?[a-z][a-z0-9]*[^>]*>)/gi;
+  const parts = html.split(regex);
+
+  for (const part of parts) {
+    if (!part) continue;
+
+    if (part.startsWith("</")) {
+      // Closing tag - pop from stack
+      if (stack.length > 0) {
+        const node = stack.pop()!;
+        if (stack.length > 0) {
+          stack[stack.length - 1].children!.push(node);
+        } else {
+          nodes.push(node);
+        }
+      }
+    } else if (part.startsWith("<")) {
+      // Opening tag
+      const tagMatch = part.match(/^<([a-z][a-z0-9]*)/i);
+      if (tagMatch) {
+        const tag = tagMatch[1].toLowerCase();
+        // Self-closing tags
+        if (part.endsWith("/>") || ["br", "hr", "img"].includes(tag)) {
+          const node: Node = { type: "element", tag, children: [] };
+          if (stack.length > 0) {
+            stack[stack.length - 1].children!.push(node);
+          } else {
+            nodes.push(node);
+          }
+        } else {
+          stack.push({ type: "element", tag, children: [] });
+        }
+      }
+    } else {
+      // Text node
+      if (part.trim()) {
+        const textNode: Node = { type: "text", text: part };
+        if (stack.length > 0) {
+          stack[stack.length - 1].children!.push(textNode);
+        } else {
+          nodes.push(textNode);
+        }
+      }
+    }
+  }
+
+  // Flush remaining stack
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    if (stack.length > 0) {
+      stack[stack.length - 1].children!.push(node);
+    } else {
+      nodes.push(node);
+    }
+  }
+
+  return nodes;
+}
+
+/**
+ * Get plain text from a node tree.
+ */
+function getNodeText(node: Node): string {
+  if (node.type === "text") return node.text || "";
+  if (!node.children) return "";
+  return node.children.map(getNodeText).join("");
+}
+
+/**
+ * Check if a node contains bold (strong/b) formatting.
+ */
+function isNodeBold(node: Node): boolean {
+  if (node.type === "text") return false;
+  if (node.tag === "strong" || node.tag === "b") return true;
+  if (!node.children) return false;
+
+  const totalText = getNodeText(node).trim();
+  if (!totalText) return false;
+
+  const boldText = getBoldText(node).trim();
+  return boldText.length >= totalText.length * 0.5;
+}
+
+function getBoldText(node: Node): string {
+  if (node.type === "text") return "";
+  if (node.tag === "strong" || node.tag === "b") return getNodeText(node);
+  if (!node.children) return "";
+  return node.children.map(getBoldText).join("");
+}
+
+/**
+ * Main parsing logic: walk the HTML tree and extract questions.
+ */
+function parseHtmlToQuestions(html: string): ParsedQuestion[] {
+  const tree = parseHtmlTree(html);
+  const questions: ParsedQuestion[] = [];
+  let questionCounter = 0;
+
+  // Process all top-level nodes
+  for (let i = 0; i < tree.length; i++) {
+    const node = tree[i];
+
+    if (node.type === "element" && (node.tag === "ol" || node.tag === "ul")) {
+      // This is a top-level list — each <li> is potentially a question
+      processTopLevelList(node, questions, questionCounter);
+      questionCounter = questions.length;
+    } else if (node.type === "element" && node.tag === "p") {
+      // Paragraph — might be a question like "7. Standart..."
+      const text = getNodeText(node).trim();
+      const questionMatch = text.match(/^(\d+)[.)]\s*(.+)/);
+
+      if (questionMatch) {
+        // This is a numbered question in a paragraph
+        const qNum = parseInt(questionMatch[1]);
+        const qText = questionMatch[2];
+
+        // Look ahead for options (next node might be ul/ol with options)
+        const options: { label: string; text: string; isBold: boolean }[] = [];
+        let j = i + 1;
+
+        while (j < tree.length) {
+          const next = tree[j];
+          if (next.type === "element" && (next.tag === "ol" || next.tag === "ul")) {
+            // Collect options from this list
+            const listOptions = extractOptionsFromList(next);
+            options.push(...listOptions);
+            j++;
+            break;
+          } else if (next.type === "element" && next.tag === "p") {
+            // Paragraph options (like soal 10)
+            const pText = getNodeText(next).trim();
+            if (pText && pText.length < 100) {
+              const optLabels = ["A", "B", "C", "D", "E", "F"];
+              const label = optLabels[options.length] || "?";
+              options.push({ label, text: pText, isBold: isNodeBold(next) });
+              j++;
+            } else {
+              break;
+            }
+          } else {
+            break;
+          }
+        }
+
+        if (options.length > 0) {
+          const correctAnswer = options.find((o) => o.isBold)?.label || null;
+          questions.push({ number: qNum, question: qText, options, correctAnswer });
+          questionCounter = questions.length;
+          i = j - 1; // Skip processed nodes
+        }
+      }
+    }
+  }
 
   return questions;
 }
 
-interface ContentItem {
-  text: string;
-  isBold: boolean;
-  isNested: boolean; // true if inside a nested list (likely an option)
-  depth: number;
-}
-
 /**
- * Walk through the HTML and extract content items with context.
+ * Process a top-level <ol> where each <li> can be a question.
  */
-function extractItems(html: string): ContentItem[] {
-  const items: ContentItem[] = [];
+function processTopLevelList(
+  listNode: Node,
+  questions: ParsedQuestion[],
+  startNumber: number
+): void {
+  if (!listNode.children) return;
 
-  // Split HTML into tokens (tags and text)
-  const tokens = html.split(/(<[^>]+>)/g).filter(Boolean);
+  const items = listNode.children.filter(
+    (n) => n.type === "element" && n.tag === "li"
+  );
 
-  let depth = 0; // ol/ul nesting depth
-  let inLi = false;
-  let currentText = "";
-  let currentHtml = "";
+  let questionNum = startNumber;
 
-  function flush() {
-    const text = currentText.trim();
-    if (text) {
-      items.push({
-        text,
-        isBold: isTextBold(currentHtml),
-        isNested: depth > 1,
-        depth,
+  for (const li of items) {
+    if (!li.children) continue;
+
+    // Separate the <li> content into:
+    // - Direct text/inline content (the question)
+    // - Nested <ol>/<ul> (the options)
+    const questionParts: string[] = [];
+    let questionIsBold = false;
+    const nestedLists: Node[] = [];
+    const directChildren: Node[] = [];
+
+    for (const child of li.children) {
+      if (child.type === "element" && (child.tag === "ol" || child.tag === "ul")) {
+        nestedLists.push(child);
+      } else {
+        directChildren.push(child);
+        questionParts.push(getNodeText(child));
+      }
+    }
+
+    const questionText = questionParts.join("").trim();
+
+    // If there's no question text and no nested list, this might be a flat option
+    // that was incorrectly placed at top level (like soal 5-6 broken structure)
+    if (!questionText && nestedLists.length === 0) continue;
+
+    // If there IS question text but NO nested list, this <li> might be
+    // a stray option from a broken structure. Skip short items without nested options.
+    if (questionText && nestedLists.length === 0 && questionText.length < 50) {
+      // This is likely a stray option, not a question. Skip it.
+      continue;
+    }
+
+    // We have a question
+    if (nestedLists.length > 0) {
+      questionNum++;
+      const options = extractOptionsFromList(nestedLists[0]);
+
+      // For deeply nested lists (ul > li > ol > li pattern from soal 3)
+      if (options.length === 0 && nestedLists[0].children) {
+        for (const nestedChild of nestedLists[0].children) {
+          if (nestedChild.type === "element" && (nestedChild.tag === "ol" || nestedChild.tag === "ul")) {
+            const deepOptions = extractOptionsFromList(nestedChild);
+            options.push(...deepOptions);
+          } else if (nestedChild.type === "element" && nestedChild.tag === "li") {
+            // li inside ul that contains another ol
+            if (nestedChild.children) {
+              for (const deepChild of nestedChild.children) {
+                if (deepChild.type === "element" && (deepChild.tag === "ol" || deepChild.tag === "ul")) {
+                  const deepOptions = extractOptionsFromList(deepChild);
+                  options.push(...deepOptions);
+                }
+              }
+            }
+          }
+        }
+      }
+
+      const correctAnswer = options.find((o) => o.isBold)?.label || null;
+      questions.push({
+        number: questionNum,
+        question: questionText,
+        options,
+        correctAnswer,
+      });
+    } else if (questionText.length >= 50) {
+      // Long text without nested list — question without properly nested options
+      // Look for options in subsequent top-level <li> items (broken structure)
+      questionNum++;
+      questions.push({
+        number: questionNum,
+        question: questionText,
+        options: [],
+        correctAnswer: null,
       });
     }
-    currentText = "";
-    currentHtml = "";
   }
-
-  for (const token of tokens) {
-    if (token.startsWith("<")) {
-      const tagLower = token.toLowerCase();
-
-      if (tagLower.startsWith("<ol") || tagLower.startsWith("<ul")) {
-        depth++;
-      } else if (tagLower === "</ol>" || tagLower === "</ul>") {
-        depth--;
-        if (depth < 0) depth = 0;
-      } else if (tagLower.startsWith("<li")) {
-        flush();
-        inLi = true;
-      } else if (tagLower === "</li>") {
-        flush();
-        inLi = false;
-      } else if (tagLower.startsWith("<p")) {
-        flush();
-      } else if (tagLower === "</p>") {
-        flush();
-      }
-
-      // Track HTML for bold detection
-      currentHtml += token;
-    } else {
-      // Text content
-      currentText += token;
-      currentHtml += token;
-    }
-  }
-
-  flush();
-  return items;
 }
 
 /**
- * Group sequential items into questions.
- * A question is identified by:
- * - A non-nested item at depth <= 1 that looks like question text
- * - Followed by nested items (depth > 1) or sequential short items that are options
+ * Extract options from a nested list (ol/ul).
+ * Each <li> is one option.
  */
-function groupIntoQuestions(items: ContentItem[]): ParsedQuestion[] {
-  const questions: ParsedQuestion[] = [];
-  let questionNumber = 0;
+function extractOptionsFromList(listNode: Node): { label: string; text: string; isBold: boolean }[] {
+  if (!listNode.children) return [];
 
-  let i = 0;
-  while (i < items.length) {
-    const item = items[i];
+  const options: { label: string; text: string; isBold: boolean }[] = [];
+  const optLabels = ["A", "B", "C", "D", "E", "F"];
 
-    // Check if this looks like a question start
-    // Questions are typically at depth 1 (first level li) or depth 0 (paragraph)
-    // and contain meaningful text (not just a short option)
-    const isQuestionStart =
-      !item.isNested &&
-      item.depth <= 1 &&
-      item.text.length > 5 && // Questions are longer than options typically
-      !isLikelyOption(item.text);
+  const items = listNode.children.filter(
+    (n) => n.type === "element" && n.tag === "li"
+  );
 
-    // Also detect "7. Standart..." pattern in paragraphs
-    const plainQuestionMatch = item.text.match(/^(\d+)[.)]\s*(.+)/);
+  for (const li of items) {
+    const text = getNodeText(li).trim();
+    if (!text) continue;
 
-    if (isQuestionStart || (plainQuestionMatch && !isLikelyOption(item.text))) {
-      questionNumber++;
-      let questionText = item.text;
+    const label = optLabels[options.length] || "?";
+    const isBold = isNodeBold(li);
 
-      // If it matches a numbered pattern, extract the number
-      if (plainQuestionMatch) {
-        questionNumber = parseInt(plainQuestionMatch[1]);
-        questionText = plainQuestionMatch[2];
-      }
-
-      // Collect options that follow
-      const options: { label: string; text: string; isBold: boolean }[] = [];
-      const optionLabels = ["A", "B", "C", "D", "E", "F"];
-      let j = i + 1;
-
-      while (j < items.length) {
-        const next = items[j];
-
-        // Stop if we hit another question
-        if (
-          !next.isNested &&
-          next.depth <= 1 &&
-          next.text.length > 5 &&
-          !isLikelyOption(next.text) &&
-          options.length >= 2 // We need at least 2 options before a new question
-        ) {
-          break;
-        }
-
-        // Also stop if we hit a numbered question pattern
-        const nextQuestionMatch = next.text.match(/^(\d+)[.)]\s*(.+)/);
-        if (nextQuestionMatch && !isLikelyOption(next.text) && options.length >= 2) {
-          break;
-        }
-
-        // This is an option
-        if (next.text.trim()) {
-          const label = optionLabels[options.length] || "?";
-          options.push({
-            label,
-            text: next.text.trim(),
-            isBold: next.isBold,
-          });
-        }
-
-        j++;
-
-        // Max 6 options per question
-        if (options.length >= 6) break;
-      }
-
-      // Determine correct answer
-      let correctAnswer: string | null = null;
-      const boldOptions = options.filter((o) => o.isBold);
-      if (boldOptions.length > 0) {
-        correctAnswer = boldOptions[0].label;
-      }
-
-      if (options.length > 0) {
-        questions.push({
-          number: questionNumber,
-          question: questionText,
-          options,
-          correctAnswer,
-        });
-      }
-
-      i = j;
-    } else {
-      i++;
-    }
+    options.push({ label, text, isBold });
   }
 
-  return questions;
-}
-
-/**
- * Check if text looks like an option rather than a question.
- */
-function isLikelyOption(text: string): boolean {
-  // Very short text is likely an option
-  if (text.length <= 30 && !text.includes(":") && !text.includes("?")) {
-    return true;
-  }
-  // Starts with option-like pattern
-  if (/^[A-Da-d][.)]\s/.test(text)) {
-    return true;
-  }
-  // Common option texts
-  const optionPatterns = [
-    /^semua\s+(benar|salah)/i,
-    /^output\s/i,
-    /^\d+\s*volt/i,
-    /^(CPU|Input|Output|Rele|Transistor|TRIAC)/i,
-  ];
-  for (const p of optionPatterns) {
-    if (p.test(text.trim())) return true;
-  }
-  return false;
-}
-
-/**
- * Check if HTML segment contains bold formatting for the majority of its text.
- */
-function isTextBold(html: string): boolean {
-  const textContent = html.replace(/<[^>]+>/g, "").trim();
-  if (!textContent) return false;
-
-  const boldMatches = html.match(/<strong>([\s\S]*?)<\/strong>|<b>([\s\S]*?)<\/b>/gi);
-  if (!boldMatches) return false;
-
-  const boldText = boldMatches
-    .map((m) => m.replace(/<[^>]+>/g, ""))
-    .join("")
-    .trim();
-
-  // More than 50% of the text is bold
-  return boldText.length >= textContent.length * 0.5;
+  return options;
 }
