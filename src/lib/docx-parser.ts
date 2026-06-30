@@ -12,330 +12,145 @@ export interface ParseResult {
   errors: string[];
 }
 
-interface TextBlock {
-  text: string;
-  isBold: boolean;
-  nestLevel: number;
-}
-
 /**
  * Parses a DOCX buffer and extracts quiz questions.
- * Supports:
- * - Plain text numbered questions (1. 2. 3.)
- * - Word auto-numbered lists (ol/li)
- * - Options: a/b/c/d or A/B/C/D (with . or ))
- * - Options as nested/indented list items
- * - Bold text = correct answer
+ * Uses both raw text (for structure) and HTML (for bold detection).
  */
 export async function parseDocx(buffer: Buffer): Promise<ParseResult> {
-  const result = await mammoth.convertToHtml({ buffer });
-  const html = result.value;
+  // Get HTML for bold detection
+  const htmlResult = await mammoth.convertToHtml({ buffer });
+  const html = htmlResult.value;
 
-  // Try structured list parsing first (handles Word numbered lists)
-  const listResult = parseFromHtmlStructure(html);
-  if (listResult.questions.length > 0) {
-    return listResult;
-  }
+  // Get raw text for structure parsing
+  const textResult = await mammoth.extractRawText({ buffer });
+  const rawText = textResult.value;
 
-  // Fallback: line-by-line text parsing
-  const lineResult = parseFromTextLines(html);
-  return lineResult;
-}
+  // Parse questions from raw text
+  const questions = parseQuestionsFromText(rawText);
 
-/**
- * Parse using HTML structure — handles Word's <ol>/<li> numbered lists
- * where questions are top-level list items and options are nested lists.
- */
-function parseFromHtmlStructure(html: string): ParseResult {
-  const questions: ParsedQuestion[] = [];
+  // Detect bold answers from HTML
+  const boldTexts = extractAllBoldTexts(html);
+
+  // Match bold texts to options
+  const result: ParsedQuestion[] = [];
   const errors: string[] = [];
 
-  // Extract all blocks with nesting level info
-  const blocks = extractBlocksWithNesting(html);
-
-  let currentQuestion: Partial<ParsedQuestion> | null = null;
-  let currentOptions: { label: string; text: string; isBold: boolean }[] = [];
-  let questionNumber = 0;
-  let lastTopLevelIndex = -1;
-
-  for (let i = 0; i < blocks.length; i++) {
-    const block = blocks[i];
-    const trimmed = block.text.trim();
-    if (!trimmed) continue;
-
-    // Detect explicit option pattern: a. / b. / c. / d. or A. / B. etc
-    const optionMatch = trimmed.match(/^([A-Da-d])[.)]\s*(.*)/);
-
-    // Detect explicit question number pattern
-    const questionMatch = trimmed.match(/^(\d+)[.)]\s*(.*)/);
-
-    if (optionMatch) {
-      // This is definitely an option
-      const label = optionMatch[1].toUpperCase();
-      const text = optionMatch[2] || trimmed;
-      currentOptions.push({ label, text, isBold: block.isBold });
-    } else if (block.nestLevel > 0 && currentQuestion) {
-      // Nested item without explicit a/b/c/d prefix — treat as option by position
-      const optionLabels = ["A", "B", "C", "D", "E"];
-      const label = optionLabels[currentOptions.length] || "?";
-      currentOptions.push({ label, text: trimmed, isBold: block.isBold });
-    } else if (questionMatch && block.nestLevel === 0) {
-      // Top level numbered item = new question
-      if (currentQuestion && currentQuestion.question) {
-        finalizeQuestion(currentQuestion, currentOptions, questions, errors);
-      }
-      questionNumber = parseInt(questionMatch[1]);
-      currentQuestion = {
-        number: questionNumber,
-        question: questionMatch[2] || trimmed,
-      };
-      currentOptions = [];
-      lastTopLevelIndex = i;
-    } else if (block.nestLevel === 0 && currentOptions.length > 0) {
-      // New top-level text after options = finalize and start new question
-      if (currentQuestion && currentQuestion.question) {
-        finalizeQuestion(currentQuestion, currentOptions, questions, errors);
-      }
-      questionNumber++;
-      currentQuestion = {
-        number: questionNumber,
-        question: trimmed,
-      };
-      currentOptions = [];
-      lastTopLevelIndex = i;
-    } else if (block.nestLevel === 0 && !currentQuestion) {
-      // First top-level item, start as question
-      questionNumber++;
-      currentQuestion = {
-        number: questionNumber,
-        question: trimmed,
-      };
-      currentOptions = [];
-      lastTopLevelIndex = i;
-    } else if (currentQuestion && currentOptions.length === 0 && block.nestLevel === 0) {
-      // Continuation of question text at same level
-      currentQuestion.question =
-        (currentQuestion.question || "") + " " + trimmed;
+  for (const q of questions) {
+    if (q.options.length === 0) {
+      errors.push(`Soal nomor ${q.number} tidak dapat diproses.`);
+      continue;
     }
+
+    // Find correct answer by matching bold text to option text
+    let correctAnswer: string | null = null;
+
+    for (const opt of q.options) {
+      const optFullText = `${opt.label.toLowerCase()}. ${opt.text}`.toLowerCase().trim();
+      const optTextOnly = opt.text.toLowerCase().trim();
+
+      for (const boldText of boldTexts) {
+        const boldLower = boldText.toLowerCase().trim();
+
+        // Check if bold text matches the option (full or partial)
+        if (
+          boldLower === optFullText ||
+          boldLower === optTextOnly ||
+          boldLower === `${opt.label.toLowerCase()}.${opt.text.toLowerCase().trim()}` ||
+          boldLower === `${opt.label.toLowerCase()}. ${opt.text.toLowerCase().trim()}` ||
+          (optTextOnly.length > 3 && boldLower.includes(optTextOnly)) ||
+          (boldLower.length > 3 && optTextOnly.includes(boldLower))
+        ) {
+          correctAnswer = opt.label;
+          opt.isBold = true;
+          break;
+        }
+      }
+      if (correctAnswer) break;
+    }
+
+    if (!correctAnswer) {
+      errors.push(`Soal nomor ${q.number} tidak memiliki kunci jawaban.`);
+    }
+
+    result.push({
+      number: q.number,
+      question: q.question,
+      options: q.options,
+      correctAnswer,
+    });
   }
 
-  // Last question
-  if (currentQuestion && currentQuestion.question) {
-    finalizeQuestion(currentQuestion, currentOptions, questions, errors);
-  }
+  return { questions: result, errors };
+}
 
-  return { questions, errors };
+interface RawQuestion {
+  number: number;
+  question: string;
+  options: { label: string; text: string; isBold: boolean }[];
 }
 
 /**
- * Fallback: parse as flat text lines (for simpler formatted documents)
+ * Parse questions from raw text extracted by mammoth.
+ * Handles both plain numbered format and list format.
  */
-function parseFromTextLines(html: string): ParseResult {
-  const questions: ParsedQuestion[] = [];
-  const errors: string[] = [];
+function parseQuestionsFromText(rawText: string): RawQuestion[] {
+  const lines = rawText.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+  const questions: RawQuestion[] = [];
 
-  const lines = extractFlatLines(html);
+  let currentQuestion: RawQuestion | null = null;
 
-  let currentQuestion: Partial<ParsedQuestion> | null = null;
-  let currentOptions: { label: string; text: string; isBold: boolean }[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
 
-  for (const line of lines) {
-    const trimmed = line.text.trim();
-    if (!trimmed) continue;
-
-    const questionMatch = trimmed.match(/^(\d+)[.)]\s*(.+)/);
-    const optionMatch = trimmed.match(/^([A-Da-d])[.)]\s*(.+)/);
+    // Match question: starts with number followed by . or )
+    const questionMatch = line.match(/^(\d+)[.)]\s*(.+)/);
+    // Match option: starts with a-d/A-D followed by . or )
+    const optionMatch = line.match(/^([A-Da-d])[.)]\s*(.+)/);
 
     if (questionMatch && !optionMatch) {
-      if (currentQuestion && currentQuestion.question) {
-        finalizeQuestion(currentQuestion, currentOptions, questions, errors);
+      // New question
+      if (currentQuestion) {
+        questions.push(currentQuestion);
       }
       currentQuestion = {
         number: parseInt(questionMatch[1]),
-        question: questionMatch[2],
+        question: questionMatch[2].trim(),
+        options: [],
       };
-      currentOptions = [];
     } else if (optionMatch && currentQuestion) {
+      // Option for current question
       const label = optionMatch[1].toUpperCase();
-      const text = optionMatch[2];
-      currentOptions.push({ label, text, isBold: line.isBold });
-    } else if (currentQuestion && currentOptions.length === 0) {
-      currentQuestion.question =
-        (currentQuestion.question || "") + " " + trimmed;
+      const text = optionMatch[2].trim();
+      currentQuestion.options.push({ label, text, isBold: false });
+    } else if (currentQuestion && currentQuestion.options.length === 0) {
+      // Continuation of question text
+      currentQuestion.question += " " + line;
     }
   }
 
-  if (currentQuestion && currentQuestion.question) {
-    finalizeQuestion(currentQuestion, currentOptions, questions, errors);
+  // Don't forget last question
+  if (currentQuestion) {
+    questions.push(currentQuestion);
   }
 
-  return { questions, errors };
-}
-
-function finalizeQuestion(
-  q: Partial<ParsedQuestion>,
-  options: { label: string; text: string; isBold: boolean }[],
-  questions: ParsedQuestion[],
-  errors: string[]
-) {
-  const number = q.number || questions.length + 1;
-
-  if (options.length === 0) {
-    errors.push(`Soal nomor ${number} tidak dapat diproses.`);
-    return;
-  }
-
-  const boldOptions = options.filter((o) => o.isBold);
-  let correctAnswer: string | null = null;
-
-  if (boldOptions.length === 0) {
-    errors.push(`Soal nomor ${number} tidak memiliki kunci jawaban.`);
-  } else {
-    correctAnswer = boldOptions[0].label;
-  }
-
-  questions.push({
-    number,
-    question: q.question || "",
-    options,
-    correctAnswer,
-  });
+  // Filter out "questions" that are actually just noise (like empty ones or "7." alone)
+  return questions.filter((q) => q.question.trim().length > 0 && q.options.length > 0);
 }
 
 /**
- * Extract blocks with nesting level from HTML.
- * Tracks <ol>/<ul> depth to determine if something is a question or option.
+ * Extract all bold text segments from HTML.
  */
-function extractBlocksWithNesting(html: string): TextBlock[] {
-  const blocks: TextBlock[] = [];
+function extractAllBoldTexts(html: string): string[] {
+  const boldTexts: string[] = [];
+  const regex = /<strong>([\s\S]*?)<\/strong>|<b>([\s\S]*?)<\/b>/gi;
+  let match;
 
-  // Process HTML by tracking list nesting
-  let nestLevel = 0;
-  const parts = html.split(/(<\/?(?:ol|ul|li|p|h[1-6])[^>]*>)/gi);
-
-  let currentText = "";
-  let currentBold = false;
-  let inListItem = false;
-
-  for (const part of parts) {
-    const lowerPart = part.toLowerCase();
-
-    if (lowerPart.startsWith("<ol") || lowerPart.startsWith("<ul")) {
-      nestLevel++;
-    } else if (lowerPart === "</ol>" || lowerPart === "</ul>") {
-      nestLevel--;
-      if (nestLevel < 0) nestLevel = 0;
-    } else if (lowerPart.startsWith("<li")) {
-      // Start of list item — flush previous
-      if (currentText.trim()) {
-        const text = currentText.replace(/<[^>]+>/g, "").trim();
-        if (text) {
-          blocks.push({
-            text,
-            isBold: isContentBold(currentText),
-            nestLevel: Math.max(0, nestLevel - 1),
-          });
-        }
-      }
-      currentText = "";
-      inListItem = true;
-    } else if (lowerPart === "</li>") {
-      // End of list item
-      if (currentText.trim()) {
-        const text = currentText.replace(/<[^>]+>/g, "").trim();
-        if (text) {
-          blocks.push({
-            text,
-            isBold: isContentBold(currentText),
-            nestLevel: Math.max(0, nestLevel - 1),
-          });
-        }
-      }
-      currentText = "";
-      inListItem = false;
-    } else if (lowerPart.startsWith("<p") || lowerPart.startsWith("<h")) {
-      // Paragraph/heading start — flush previous
-      if (currentText.trim()) {
-        const text = currentText.replace(/<[^>]+>/g, "").trim();
-        if (text) {
-          blocks.push({
-            text,
-            isBold: isContentBold(currentText),
-            nestLevel: 0,
-          });
-        }
-      }
-      currentText = "";
-    } else if (lowerPart === "</p>" || /^<\/h[1-6]>$/.test(lowerPart)) {
-      // Paragraph/heading end
-      if (currentText.trim()) {
-        const text = currentText.replace(/<[^>]+>/g, "").trim();
-        if (text) {
-          blocks.push({
-            text,
-            isBold: isContentBold(currentText),
-            nestLevel: 0,
-          });
-        }
-      }
-      currentText = "";
-    } else {
-      currentText += part;
+  while ((match = regex.exec(html)) !== null) {
+    const text = (match[1] || match[2] || "").replace(/<[^>]+>/g, "").trim();
+    if (text && text.length > 1) {
+      boldTexts.push(text);
     }
   }
 
-  // Flush remaining
-  if (currentText.trim()) {
-    const text = currentText.replace(/<[^>]+>/g, "").trim();
-    if (text) {
-      blocks.push({
-        text,
-        isBold: isContentBold(currentText),
-        nestLevel: 0,
-      });
-    }
-  }
-
-  return blocks;
-}
-
-function extractFlatLines(html: string): TextBlock[] {
-  const lines: TextBlock[] = [];
-  const segments = html.split(/<\/p>|<\/h[1-6]>|<\/li>|<br\s*\/?>/gi);
-
-  for (const segment of segments) {
-    const clean = segment
-      .replace(/<p[^>]*>|<h[1-6][^>]*>|<li[^>]*>|<ul[^>]*>|<ol[^>]*>|<\/ul>|<\/ol>/gi, "")
-      .trim();
-    if (!clean) continue;
-
-    const text = clean.replace(/<[^>]+>/g, "").trim();
-    if (text) {
-      lines.push({ text, isBold: isContentBold(clean), nestLevel: 0 });
-    }
-  }
-
-  return lines;
-}
-
-function isContentBold(html: string): boolean {
-  const textContent = html.replace(/<[^>]+>/g, "").trim();
-  if (!textContent) return false;
-
-  const boldContent = extractBoldText(html).trim();
-
-  // If more than 50% of text is bold, consider it bold
-  return boldContent.length > 0 && boldContent.length >= textContent.length * 0.5;
-}
-
-function extractBoldText(html: string): string {
-  const boldMatches = html.match(
-    /<strong>([\s\S]*?)<\/strong>|<b>([\s\S]*?)<\/b>/gi
-  );
-  if (!boldMatches) return "";
-
-  return boldMatches
-    .map((m) => m.replace(/<[^>]+>/g, ""))
-    .join("")
-    .trim();
+  return boldTexts;
 }
