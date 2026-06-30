@@ -398,29 +398,41 @@ export default function Home() {
               </button>
 
               {/* Format guide */}
-              <details className="text-sm text-gray-600">
+              <details className="text-sm text-gray-600" open>
                 <summary className="cursor-pointer font-medium hover:text-gray-800">
-                  Document Format Guide
+                  Format Dokumen (PENTING)
                 </summary>
-                <div className="mt-3 bg-gray-50 rounded-lg p-4 space-y-2 text-xs">
-                  <p>Your Word document should follow this format:</p>
+                <div className="mt-3 bg-gray-50 rounded-lg p-4 space-y-3 text-xs">
+                  <div className="bg-yellow-50 border border-yellow-200 rounded p-2">
+                    <p className="font-semibold text-yellow-800">Aturan:</p>
+                    <ul className="list-disc list-inside text-yellow-700 mt-1 space-y-1">
+                      <li>Ketik nomor soal MANUAL (1. 2. 3.) — jangan pakai auto-numbering Word</li>
+                      <li>Ketik huruf opsi MANUAL (A. B. C. D.) — jangan pakai bullet/list otomatis</li>
+                      <li>BOLD jawaban yang benar (Select → Ctrl+B)</li>
+                      <li>Setiap soal harus punya 4 opsi</li>
+                    </ul>
+                  </div>
+                  <p className="font-medium">Contoh format:</p>
                   <pre className="bg-gray-100 p-3 rounded text-xs overflow-x-auto">
-                    {`1. What is the capital of Indonesia?
+                    {`1. Apa ibukota Indonesia?
 A. Bangkok
-B. Jakarta (bold this for correct answer)
+B. Jakarta    ← Bold ini di Word
 C. Manila
 D. Kuala Lumpur
 
-2. Next question...
-A. Option A
-B. Option B
-C. Option C
-D. Option D`}
+2. Bahasa pemrograman untuk web:
+A. Python
+B. JavaScript    ← Bold ini di Word
+C. C++
+D. Semua benar`}
                   </pre>
-                  <p>
-                    <strong>Bold</strong> the correct answer option in
-                    Microsoft Word to mark it as the correct answer.
-                  </p>
+                  <a
+                    href="/template-guide.txt"
+                    download
+                    className="inline-block mt-2 text-blue-600 hover:text-blue-800 font-medium"
+                  >
+                    Download Template Guide →
+                  </a>
                 </div>
               </details>
             </form>

@@ -1,0 +1,35 @@
+FORMAT TEMPLATE SOAL - Word to Google Form Quiz Generator
+=========================================================
+
+ATURAN PENTING:
+- Ketik MANUAL nomor soal dan huruf opsi (JANGAN pakai auto-numbering Word)
+- Bold jawaban yang benar di Microsoft Word (Select text → Ctrl+B)
+- Setiap soal HARUS punya 4 opsi (A, B, C, D)
+- Pisahkan setiap soal dengan baris kosong
+
+CONTOH FORMAT:
+--------------
+
+1. Apa ibukota Indonesia?
+A. Bangkok
+B. Jakarta
+C. Manila
+D. Kuala Lumpur
+
+2. Siapa presiden pertama Indonesia?
+A. Soekarno
+B. Soeharto
+C. Habibie
+D. Megawati
+
+3. Bahasa pemrograman yang digunakan untuk web adalah:
+A. Python
+B. JavaScript
+C. C++
+D. Semua benar
+
+CATATAN:
+- Jawaban yang benar harus di-BOLD di Microsoft Word
+- Contoh: jika jawaban soal 1 adalah B, maka "B. Jakarta" harus di-bold
+- Format huruf opsi bisa pakai huruf besar (A. B. C. D.) atau kecil (a. b. c. d.)
+- Soal bisa diakhiri dengan tanda : atau ? atau tanpa tanda baca
