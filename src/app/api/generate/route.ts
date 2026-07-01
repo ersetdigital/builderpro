@@ -3,6 +3,10 @@ import { auth } from "@/lib/auth";
 import { google } from "googleapis";
 import { QuizItem } from "@/lib/docx-numbering-parser";
 
+// Allow larger request bodies (up to 50MB)
+export const runtime = "nodejs";
+export const maxDuration = 60;
+
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
 
 export async function POST(request: NextRequest) {
