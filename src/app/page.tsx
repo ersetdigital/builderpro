@@ -12,6 +12,7 @@ interface GenerateResult {
   errors?: string[];
   error?: string;
   details?: string[];
+  debug?: { text: string; numId: number | null; ilvl: number | null; numFormat: string | null; isBold: boolean }[];
 }
 
 export default function Home() {
@@ -75,6 +76,7 @@ export default function Home() {
             (data.error || "") + "\n" + data.details.join("\n")
           );
         }
+        setResult(data);
       } else {
         setResult(data);
       }
@@ -359,6 +361,14 @@ export default function Home() {
                   <p className="text-sm text-red-700 whitespace-pre-line">
                     {error}
                   </p>
+                  {result?.debug && (
+                    <details className="mt-3">
+                      <summary className="text-xs text-red-600 cursor-pointer font-medium">Debug: parsed paragraphs</summary>
+                      <pre className="mt-2 text-xs text-gray-700 bg-gray-100 rounded p-2 overflow-x-auto max-h-60 overflow-y-auto">
+                        {JSON.stringify(result.debug, null, 2)}
+                      </pre>
+                    </details>
+                  )}
                 </div>
               )}
 

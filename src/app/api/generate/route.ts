@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { google } from "googleapis";
-import { parseQuizDocx, QuizItem } from "@/lib/docx-numbering-parser";
+import { QuizItem } from "@/lib/docx-numbering-parser";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
@@ -48,8 +48,22 @@ export async function POST(request: NextRequest) {
     const buffer = Buffer.from(arrayBuffer);
 
     let items: QuizItem[];
+    let debugParagraphs: { text: string; role: string; numId: number | null; ilvl: number | null; numFormat: string | null; isBold: boolean }[] = [];
     try {
-      items = await parseQuizDocx(buffer);
+      const { parseDocxViaXml, buildQuizFromParagraphs } = await import("@/lib/docx-numbering-parser");
+      const paragraphs = await parseDocxViaXml(buffer);
+      
+      // Build debug info
+      debugParagraphs = paragraphs.slice(0, 30).map((p) => ({
+        text: p.text.substring(0, 80),
+        role: "pending",
+        numId: p.numId,
+        ilvl: p.ilvl,
+        numFormat: p.numFormat,
+        isBold: p.isBold,
+      }));
+      
+      items = buildQuizFromParagraphs(paragraphs);
     } catch (err) {
       console.error("DOCX parse error:", err);
       return NextResponse.json(
@@ -63,6 +77,7 @@ export async function POST(request: NextRequest) {
         {
           error:
             "Tidak ada soal terdeteksi. Pastikan format soal & opsi bernomor/berhuruf.",
+          debug: debugParagraphs,
         },
         { status: 422 }
       );
