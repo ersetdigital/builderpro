@@ -159,6 +159,59 @@ function toArray<T>(val: T | T[] | undefined | null): T[] {
   return Array.isArray(val) ? val : [val];
 }
 
+/**
+ * Check if a run is bold by examining multiple bold indicators in rPr:
+ * - <w:b/> (standard bold)
+ * - <w:b w:val="true"/> or <w:b w:val="1"/> or <w:b/> (no val = means bold)
+ * - <w:bCs/> (bold complex script — used for some languages/fonts)
+ * - Inherited from paragraph-level rPr (handled at paragraph level)
+ *
+ * Also handles the case where fast-xml-parser returns:
+ * - bNode = "" (empty string for self-closing <w:b/>)
+ * - bNode = {} (empty object)
+ * - bNode = null vs undefined
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function checkRunBold(rPr: any): boolean {
+  if (!rPr) return false;
+
+  // Check <w:b/>
+  const bNode = rPr["w:b"];
+  if (bNode !== undefined) {
+    // <w:b/> with no val attribute means bold=true
+    if (bNode === "" || bNode === null || bNode === true) return true;
+    if (typeof bNode === "object") {
+      const val = bNode["@_w:val"];
+      // No val attribute = bold
+      if (val === undefined) return true;
+      // Explicit true/1
+      if (val === "1" || val === "true" || val === true) return true;
+      // Explicit false/0 = not bold
+      if (val === "0" || val === "false" || val === false) return false;
+      // Any other value (rare) = treat as bold
+      return true;
+    }
+    // bNode is a truthy primitive (number, non-empty string, etc)
+    return true;
+  }
+
+  // Check <w:bCs/> (bold complex script)
+  const bCsNode = rPr["w:bCs"];
+  if (bCsNode !== undefined) {
+    if (bCsNode === "" || bCsNode === null || bCsNode === true) return true;
+    if (typeof bCsNode === "object") {
+      const val = bCsNode["@_w:val"];
+      if (val === undefined) return true;
+      if (val === "1" || val === "true" || val === true) return true;
+      if (val === "0" || val === "false" || val === false) return false;
+      return true;
+    }
+    return true;
+  }
+
+  return false;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function extractParagraphs(documentObj: any): any[] {
   const body = documentObj?.["w:document"]?.["w:body"];
@@ -213,6 +266,10 @@ function extractParagraphText(p: any): { text: string; isBold: boolean } {
     return { text: "", isBold: false };
   }
 
+  // Check paragraph-level bold (inherited by all runs that don't override it)
+  const pPrRPr = p["w:pPr"]?.["w:rPr"];
+  const paragraphBold = checkRunBold(pPrRPr);
+
   let combinedText = "";
   let boldRunCount = 0;
   let textRunCount = 0;
@@ -236,17 +293,27 @@ function extractParagraphText(p: any): { text: string; isBold: boolean } {
     combinedText += runText;
 
     const rPr = run["w:rPr"];
-    const bNode = rPr?.["w:b"];
-    const isRunBold =
-      bNode !== undefined &&
-      bNode?.["@_w:val"] !== "0" &&
-      bNode?.["@_w:val"] !== "false";
+    const isRunBold = checkRunBold(rPr) || (paragraphBold && !hasExplicitBoldOff(rPr));
 
     if (isRunBold) boldRunCount++;
   }
 
   const isBold = textRunCount > 0 && boldRunCount === textRunCount;
   return { text: combinedText.trim(), isBold };
+}
+
+/**
+ * Check if rPr explicitly sets bold to OFF (w:b val="0" or val="false")
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function hasExplicitBoldOff(rPr: any): boolean {
+  if (!rPr) return false;
+  const bNode = rPr["w:b"];
+  if (bNode !== undefined && typeof bNode === "object") {
+    const val = bNode["@_w:val"];
+    if (val === "0" || val === "false" || val === false) return true;
+  }
+  return false;
 }
 
 /**
@@ -268,6 +335,10 @@ function extractParagraphSegments(p: any): { text: string; isBold: boolean }[] {
   if (runs.length === 0) {
     return [];
   }
+
+  // Check paragraph-level bold (inherited by all runs)
+  const pPrRPr = p["w:pPr"]?.["w:rPr"];
+  const paragraphBold = checkRunBold(pPrRPr);
 
   // First pass: build an array of "chunks" with text + bold + isBr flag
   // This preserves per-run bold info for later splitting
@@ -303,11 +374,7 @@ function extractParagraphSegments(p: any): { text: string; isBold: boolean }[] {
     if (runText === "") continue;
 
     const rPr = run["w:rPr"];
-    const bNode = rPr?.["w:b"];
-    const isRunBold =
-      bNode !== undefined &&
-      bNode?.["@_w:val"] !== "0" &&
-      bNode?.["@_w:val"] !== "false";
+    const isRunBold = checkRunBold(rPr) || (paragraphBold && !hasExplicitBoldOff(rPr));
 
     chunks.push({ text: runText, isBold: isRunBold, isBr: false });
   }
@@ -340,7 +407,7 @@ function extractParagraphSegments(p: any): { text: string; isBold: boolean }[] {
       const ch = seg.text[i];
       const next = seg.text[i + 1];
       if (ch >= "A" && ch <= "D" && next === ".") {
-        if (i === 0 || ((seg.text[i - 1] >= "a" && seg.text[i - 1] <= "z") || seg.text[i - 1] === " ")) {
+        if (i === 0 || ((seg.text[i - 1] >= "a" && seg.text[i - 1] <= "z") || seg.text[i - 1] === " " || seg.text[i - 1] === ")" || seg.text[i - 1] === "]")) {
           positions.push(i);
         }
       }
@@ -427,8 +494,8 @@ function splitConcatenatedOptionsWithBold(chunks: { text: string; isBold: boolea
         matches.push({ index: i });
       } else {
         const prev = fullText[i - 1];
-        // preceded by lowercase letter (concatenated), space, or line start
-        if ((prev >= "a" && prev <= "z") || prev === " " || prev === "\n" || prev === "\t") {
+        // preceded by lowercase letter (concatenated), space, closing paren/bracket, or line start
+        if ((prev >= "a" && prev <= "z") || prev === " " || prev === "\n" || prev === "\t" || prev === ")" || prev === "]") {
           matches.push({ index: i });
         }
       }
@@ -478,7 +545,7 @@ function splitConcatenatedOptions(text: string, defaultBold: boolean): { text: s
     const ch = text[i];
     const next = text[i + 1];
     if (ch >= "A" && ch <= "D" && next === ".") {
-      if (i === 0 || ((text[i - 1] >= "a" && text[i - 1] <= "z") || text[i - 1] === " ")) {
+      if (i === 0 || ((text[i - 1] >= "a" && text[i - 1] <= "z") || text[i - 1] === " " || text[i - 1] === ")" || text[i - 1] === "]")) {
         positions.push(i);
       }
     }
