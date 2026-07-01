@@ -266,10 +266,6 @@ function extractParagraphText(p: any): { text: string; isBold: boolean } {
     return { text: "", isBold: false };
   }
 
-  // Check paragraph-level bold (inherited by all runs that don't override it)
-  const pPrRPr = p["w:pPr"]?.["w:rPr"];
-  const paragraphBold = checkRunBold(pPrRPr);
-
   let combinedText = "";
   let boldRunCount = 0;
   let textRunCount = 0;
@@ -293,7 +289,7 @@ function extractParagraphText(p: any): { text: string; isBold: boolean } {
     combinedText += runText;
 
     const rPr = run["w:rPr"];
-    const isRunBold = checkRunBold(rPr) || (paragraphBold && !hasExplicitBoldOff(rPr));
+    const isRunBold = checkRunBold(rPr);
 
     if (isRunBold) boldRunCount++;
   }
@@ -336,10 +332,6 @@ function extractParagraphSegments(p: any): { text: string; isBold: boolean }[] {
     return [];
   }
 
-  // Check paragraph-level bold (inherited by all runs)
-  const pPrRPr = p["w:pPr"]?.["w:rPr"];
-  const paragraphBold = checkRunBold(pPrRPr);
-
   // First pass: build an array of "chunks" with text + bold + isBr flag
   // This preserves per-run bold info for later splitting
   const chunks: { text: string; isBold: boolean; isBr: boolean }[] = [];
@@ -374,7 +366,7 @@ function extractParagraphSegments(p: any): { text: string; isBold: boolean }[] {
     if (runText === "") continue;
 
     const rPr = run["w:rPr"];
-    const isRunBold = checkRunBold(rPr) || (paragraphBold && !hasExplicitBoldOff(rPr));
+    const isRunBold = checkRunBold(rPr);
 
     chunks.push({ text: runText, isBold: isRunBold, isBr: false });
   }
@@ -761,6 +753,9 @@ export function buildQuizFromParagraphs(
 function buildQuizDirect(paragraphs: ParsedParagraph[]): QuizItem[] {
   const items: QuizItem[] = [];
   let current: QuizItem | null = null;
+  let currentSoalBold = false;
+  // Track which opsi indices are bold for post-processing
+  let boldOpsiIndices: number[] = [];
 
   for (const p of paragraphs) {
     const { role, cleanText } = classifyParagraph(p);
@@ -768,15 +763,21 @@ function buildQuizDirect(paragraphs: ParsedParagraph[]): QuizItem[] {
 
     if (role === "opsi" && current) {
       current.opsi.push(cleanText);
-      if (p.isBold && current.jawabanIndex === undefined) {
-        current.jawabanIndex = current.opsi.length - 1;
+      if (p.isBold) {
+        boldOpsiIndices.push(current.opsi.length - 1);
       }
       continue;
     }
 
     if (role === "soal") {
-      if (current) items.push(current);
+      // Finalize previous question
+      if (current) {
+        current.jawabanIndex = determineBestAnswer(boldOpsiIndices, currentSoalBold);
+        items.push(current);
+      }
       current = { soal: cleanText, opsi: [] };
+      currentSoalBold = p.isBold;
+      boldOpsiIndices = [];
       continue;
     }
 
@@ -786,10 +787,55 @@ function buildQuizDirect(paragraphs: ParsedParagraph[]): QuizItem[] {
     }
   }
 
-  if (current) items.push(current);
+  // Finalize last question
+  if (current) {
+    current.jawabanIndex = determineBestAnswer(boldOpsiIndices, currentSoalBold);
+    items.push(current);
+  }
 
   // Filter: minimal 2 opsi baru dianggap soal valid
   return items.filter((item) => item.opsi.length >= 2);
+}
+
+/**
+ * Determine the correct answer index from bold opsi indices.
+ * 
+ * Logic:
+ * 1. No bold opsi → undefined (no answer)
+ * 2. Exactly 1 bold opsi → that's the answer
+ * 3. Multiple bold opsi AND soal was NOT bold → first bold opsi is answer
+ * 4. Multiple bold opsi AND soal WAS bold → 
+ *    - If first opsi (index 0) is bold, it's likely "spillover" from soal formatting
+ *    - Skip index 0, use the NEXT bold opsi that's NOT at index 0
+ *    - If ALL bold opsi are just index 0, use it anyway
+ * 5. ALL opsi are bold → undefined (can't determine)
+ */
+function determineBestAnswer(boldIndices: number[], soalBold: boolean): number | undefined {
+  if (boldIndices.length === 0) return undefined;
+  if (boldIndices.length === 1) return boldIndices[0];
+  
+  // If all 4 opsi are bold, we can't determine
+  // (threshold: if more than 3 are bold, it's probably all bold = no signal)
+  if (boldIndices.length >= 4) return undefined;
+  
+  // If soal was bold and first opsi (index 0) is also bold, it might be spillover
+  if (soalBold && boldIndices[0] === 0) {
+    // Try to find a bold opsi that's NOT at index 0
+    const nonFirstBold = boldIndices.filter(i => i !== 0);
+    if (nonFirstBold.length === 1) {
+      // Exactly one other bold opsi besides index 0 → that's likely the real answer
+      return nonFirstBold[0];
+    }
+    if (nonFirstBold.length > 1) {
+      // Multiple non-first bold opsi — just use first non-zero one
+      return nonFirstBold[0];
+    }
+    // Only index 0 is bold — use it (it's the only signal we have)
+    return 0;
+  }
+  
+  // Soal not bold or first opsi not at index 0: use first bold opsi
+  return boldIndices[0];
 }
 
 /**
