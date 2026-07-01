@@ -330,15 +330,60 @@ function extractParagraphSegments(p: any): { text: string; isBold: boolean }[] {
   const lastSeg = flushChunksToSegment(segChunks);
   if (lastSeg) segments.push(lastSeg);
 
-  // If we only got 1 segment but it contains multiple "A. ... B. ... C. ... D. ..." patterns,
-  // split it further using regex — but now with per-character bold tracking
-  if (segments.length === 1) {
-    const textChunks = chunks.filter(c => !c.isBr);
+  // For each segment, check if it contains multiple concatenated options and split them
+  const finalSegments: { text: string; isBold: boolean }[] = [];
+  
+  for (const seg of segments) {
+    // Check if this segment contains multiple option markers (e.g. "A. xxxB. yyyC. zzz")
+    const positions: number[] = [];
+    for (let i = 0; i < seg.text.length - 1; i++) {
+      const ch = seg.text[i];
+      const next = seg.text[i + 1];
+      if (ch >= "A" && ch <= "D" && next === ".") {
+        if (i === 0 || ((seg.text[i - 1] >= "a" && seg.text[i - 1] <= "z") || seg.text[i - 1] === " ")) {
+          positions.push(i);
+        }
+      }
+    }
+    
+    if (positions.length >= 2) {
+      // This segment has multiple options concatenated — split using bold-aware function
+      // Build chunks for just this segment's text range
+      const segSplit = splitConcatenatedOptionsFromText(seg.text, chunks, segments, seg);
+      if (segSplit.length > 1) {
+        finalSegments.push(...segSplit);
+        continue;
+      }
+    }
+    
+    finalSegments.push(seg);
+  }
+
+  return finalSegments;
+}
+
+/**
+ * Split a single segment's text into multiple options, using the segment's own text for bold detection.
+ * Since we may not have exact chunk mapping for individual segments, we use the segment's isBold as default
+ * and try to detect bold from the full chunks array.
+ */
+function splitConcatenatedOptionsFromText(
+  text: string,
+  allChunks: { text: string; isBold: boolean; isBr: boolean }[],
+  allSegments: { text: string; isBold: boolean }[],
+  currentSeg: { text: string; isBold: boolean }
+): { text: string; isBold: boolean }[] {
+  // Try using the full chunk-based bold detection
+  const textChunks = allChunks.filter(c => !c.isBr);
+  
+  // If there's only 1 segment total, use the full chunk-based approach
+  if (allSegments.length === 1) {
     const split = splitConcatenatedOptionsWithBold(textChunks);
     if (split.length > 1) return split;
   }
-
-  return segments;
+  
+  // Otherwise fall back to simple text splitting with inherited bold
+  return splitConcatenatedOptions(text, currentSeg.isBold);
 }
 
 function flushChunksToSegment(chunks: { text: string; isBold: boolean }[]): { text: string; isBold: boolean } | null {
@@ -369,11 +414,25 @@ function splitConcatenatedOptionsWithBold(chunks: { text: string; isBold: boolea
   }
 
   // Split on option markers (A. B. C. D.)
-  const optionPattern = /[A-D]\.\s/g;
+  // Match uppercase A-D followed by ". " or "." at word boundary positions
+  // We find all positions where an option marker starts
   const matches: { index: number }[] = [];
-  let m;
-  while ((m = optionPattern.exec(fullText)) !== null) {
-    matches.push({ index: m.index });
+  for (let i = 0; i < fullText.length - 1; i++) {
+    const ch = fullText[i];
+    const next = fullText[i + 1];
+    // Check if this is an option marker: [A-D] followed by "."
+    if (ch >= "A" && ch <= "D" && next === ".") {
+      // Validate: must be at start OR preceded by a lowercase letter or space (not mid-word uppercase)
+      if (i === 0) {
+        matches.push({ index: i });
+      } else {
+        const prev = fullText[i - 1];
+        // preceded by lowercase letter (concatenated), space, or line start
+        if ((prev >= "a" && prev <= "z") || prev === " " || prev === "\n" || prev === "\t") {
+          matches.push({ index: i });
+        }
+      }
+    }
   }
 
   if (matches.length < 2) return [];
@@ -413,12 +472,28 @@ function splitConcatenatedOptionsWithBold(chunks: { text: string; isBold: boolea
  * Legacy split function (kept as final fallback when chunks aren't available)
  */
 function splitConcatenatedOptions(text: string, defaultBold: boolean): { text: string; isBold: boolean }[] {
-  const splitPattern = /(?=[A-D]\.\s)/g;
-  const parts = text.split(splitPattern).filter((s) => s.trim());
+  // Find option marker positions using same logic as splitConcatenatedOptionsWithBold
+  const positions: number[] = [];
+  for (let i = 0; i < text.length - 1; i++) {
+    const ch = text[i];
+    const next = text[i + 1];
+    if (ch >= "A" && ch <= "D" && next === ".") {
+      if (i === 0 || ((text[i - 1] >= "a" && text[i - 1] <= "z") || text[i - 1] === " ")) {
+        positions.push(i);
+      }
+    }
+  }
   
-  if (parts.length <= 1) return [{ text, isBold: defaultBold }];
+  if (positions.length < 2) return [{ text, isBold: defaultBold }];
   
-  return parts.map((part) => ({
+  const parts: string[] = [];
+  for (let i = 0; i < positions.length; i++) {
+    const start = positions[i];
+    const end = i + 1 < positions.length ? positions[i + 1] : text.length;
+    parts.push(text.substring(start, end).trim());
+  }
+  
+  return parts.filter(p => p).map((part) => ({
     text: part.trim(),
     isBold: defaultBold,
   }));
