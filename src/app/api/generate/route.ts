@@ -110,6 +110,14 @@ export async function POST(request: NextRequest) {
       formId: formResult.formId,
       questionsProcessed: items.length,
       errors,
+      debug: debugParagraphs,
+      parsedQuiz: items.map((item, idx) => ({
+        no: idx + 1,
+        soal: item.soal.substring(0, 80),
+        opsiCount: item.opsi.length,
+        opsi: item.opsi.map((o, i) => ({ text: o.substring(0, 60), isAnswer: item.jawabanIndex === i })),
+        jawabanIndex: item.jawabanIndex ?? null,
+      })),
     });
   } catch (error: unknown) {
     console.error("Generate error:", error);

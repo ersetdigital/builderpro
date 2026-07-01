@@ -13,6 +13,8 @@ interface GenerateResult {
   error?: string;
   details?: string[];
   debug?: { text: string; numId: number | null; ilvl: number | null; numFormat: string | null; isBold: boolean }[];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  parsedQuiz?: any[];
 }
 
 export default function Home() {
@@ -256,6 +258,28 @@ export default function Home() {
                   Generate Another Form
                 </button>
               </div>
+
+              {/* Debug info on success */}
+              {result.parsedQuiz && (
+                <details className="text-sm text-gray-600">
+                  <summary className="cursor-pointer font-medium hover:text-gray-800">
+                    Debug: Parsed Quiz Data
+                  </summary>
+                  <pre className="mt-2 text-xs text-gray-700 bg-gray-100 rounded p-3 overflow-x-auto max-h-80 overflow-y-auto">
+                    {JSON.stringify(result.parsedQuiz, null, 2)}
+                  </pre>
+                </details>
+              )}
+              {result.debug && (
+                <details className="text-sm text-gray-600">
+                  <summary className="cursor-pointer font-medium hover:text-gray-800">
+                    Debug: Raw Paragraphs
+                  </summary>
+                  <pre className="mt-2 text-xs text-gray-700 bg-gray-100 rounded p-3 overflow-x-auto max-h-80 overflow-y-auto">
+                    {JSON.stringify(result.debug, null, 2)}
+                  </pre>
+                </details>
+              )}
             </div>
           ) : (
             // Upload form
