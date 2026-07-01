@@ -22,6 +22,7 @@ export async function POST(request: NextRequest) {
     const subtitle = (formData.get("subtitle") as string) || "";
     const customFieldsRaw = (formData.get("customFields") as string) || "";
     const customFields = customFieldsRaw.split(",").map(f => f.trim()).filter(f => f);
+    const headerImage = formData.get("headerImage") as File | null;
 
     if (!file) {
       return NextResponse.json(
@@ -99,11 +100,22 @@ export async function POST(request: NextRequest) {
     );
 
     // Create Google Form
+    let headerImageUrl: string | null = null;
+    if (headerImage && session.accessToken) {
+      try {
+        headerImageUrl = await uploadImageToDrive(session.accessToken, headerImage);
+      } catch (err) {
+        console.error("Image upload error:", err);
+        // Continue without image
+      }
+    }
+
     const formResult = await createGoogleFormQuiz(
       session.accessToken,
       title || file.name.replace(/\.docx$/i, ""),
       subtitle,
       customFields,
+      headerImageUrl,
       items
     );
 
@@ -155,6 +167,7 @@ async function createGoogleFormQuiz(
   title: string,
   subtitle: string,
   customFields: string[],
+  headerImageUrl: string | null,
   items: QuizItem[]
 ): Promise<FormResult> {
   const oAuth = new google.auth.OAuth2();
@@ -203,6 +216,23 @@ async function createGoogleFormQuiz(
 
   let currentIndex = 0;
 
+  // Add header image if provided
+  if (headerImageUrl) {
+    requests.push({
+      createItem: {
+        item: {
+          title: "",
+          imageItem: {
+            image: {
+              sourceUri: headerImageUrl,
+            },
+          },
+        },
+        location: { index: currentIndex++ },
+      },
+    });
+  }
+
   // Add custom fields (e.g. Email, Nama Lengkap)
   for (const fieldName of customFields) {
     requests.push({
@@ -223,13 +253,13 @@ async function createGoogleFormQuiz(
     });
   }
 
-  // Add section header before quiz questions
+  // Add section header before quiz questions (no page break — stays on same page)
   requests.push({
     createItem: {
       item: {
         title: "Soal Pilihan Ganda",
         description: "Pilihlah salah satu jawaban yang paling tepat!",
-        pageBreakItem: {},
+        textItem: {},
       },
       location: { index: currentIndex++ },
     },
@@ -280,4 +310,62 @@ async function createGoogleFormQuiz(
   const editUrl = `https://docs.google.com/forms/d/${formId}/edit`;
 
   return { formId, formUrl, editUrl };
+}
+
+// ---------- Google Drive Image Upload ----------
+
+async function uploadImageToDrive(accessToken: string, imageFile: File): Promise<string> {
+  const arrayBuffer = await imageFile.arrayBuffer();
+  const buffer = Buffer.from(arrayBuffer);
+
+  // Step 1: Upload file to Google Drive
+  const boundary = "---boundary" + Date.now();
+  const metadata = JSON.stringify({
+    name: imageFile.name || "header-image.png",
+    mimeType: imageFile.type || "image/png",
+  });
+
+  const multipartBody = Buffer.concat([
+    Buffer.from(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metadata}\r\n--${boundary}\r\nContent-Type: ${imageFile.type || "image/png"}\r\n\r\n`),
+    buffer,
+    Buffer.from(`\r\n--${boundary}--`),
+  ]);
+
+  const uploadRes = await fetch(
+    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": `multipart/related; boundary=${boundary}`,
+      },
+      body: multipartBody,
+    }
+  );
+
+  if (!uploadRes.ok) {
+    throw new Error(`Drive upload failed: ${uploadRes.status}`);
+  }
+
+  const uploadData = await uploadRes.json();
+  const fileId = uploadData.id;
+
+  // Step 2: Make file publicly readable
+  await fetch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}/permissions`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        role: "reader",
+        type: "anyone",
+      }),
+    }
+  );
+
+  // Step 3: Return public URL
+  return `https://drive.google.com/uc?id=${fileId}`;
 }

@@ -23,6 +23,7 @@ export default function Home() {
   const [title, setTitle] = useState("");
   const [subtitle, setSubtitle] = useState("");
   const [customFields, setCustomFields] = useState("Email, Nama Lengkap");
+  const [headerImage, setHeaderImage] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState("");
   const [result, setResult] = useState<GenerateResult | null>(null);
@@ -63,6 +64,9 @@ export default function Home() {
       formData.append("title", title || file.name.replace(".docx", ""));
       formData.append("subtitle", subtitle);
       formData.append("customFields", customFields);
+      if (headerImage) {
+        formData.append("headerImage", headerImage);
+      }
 
       setProgress("Parsing document...");
 
@@ -354,6 +358,22 @@ export default function Home() {
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 />
                 <p className="text-xs text-gray-500">Field ini akan muncul sebelum soal di Google Form</p>
+              </div>
+
+              {/* Header Image */}
+              <div className="space-y-2">
+                <label className="block text-sm font-medium text-gray-700">
+                  Gambar Header (opsional)
+                </label>
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => setHeaderImage(e.target.files?.[0] || null)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                />
+                {headerImage && (
+                  <p className="text-xs text-gray-500">{headerImage.name} ({(headerImage.size / 1024).toFixed(1)} KB)</p>
+                )}
               </div>
 
               {/* File upload */}
