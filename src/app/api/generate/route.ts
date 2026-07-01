@@ -19,6 +19,9 @@ export async function POST(request: NextRequest) {
     const formData = await request.formData();
     const file = formData.get("file") as File | null;
     const title = (formData.get("title") as string) || "Quiz";
+    const subtitle = (formData.get("subtitle") as string) || "";
+    const customFieldsRaw = (formData.get("customFields") as string) || "";
+    const customFields = customFieldsRaw.split(",").map(f => f.trim()).filter(f => f);
 
     if (!file) {
       return NextResponse.json(
@@ -99,6 +102,8 @@ export async function POST(request: NextRequest) {
     const formResult = await createGoogleFormQuiz(
       session.accessToken,
       title || file.name.replace(/\.docx$/i, ""),
+      subtitle,
+      customFields,
       items
     );
 
@@ -148,6 +153,8 @@ interface FormResult {
 async function createGoogleFormQuiz(
   accessToken: string,
   title: string,
+  subtitle: string,
+  customFields: string[],
   items: QuizItem[]
 ): Promise<FormResult> {
   const oAuth = new google.auth.OAuth2();
@@ -158,13 +165,31 @@ async function createGoogleFormQuiz(
   // Step 1: Create form
   const createRes = await forms.forms.create({
     requestBody: {
-      info: { title },
+      info: { 
+        title,
+        documentTitle: title,
+      },
     },
   });
 
   const formId = createRes.data.formId!;
 
-  // Step 2: Enable quiz mode + add questions
+  // Step 2: Update description if subtitle provided
+  if (subtitle) {
+    await forms.forms.batchUpdate({
+      formId,
+      requestBody: {
+        requests: [{
+          updateFormInfo: {
+            info: { description: subtitle },
+            updateMask: "description",
+          },
+        }],
+      },
+    });
+  }
+
+  // Step 3: Enable quiz mode + add custom fields + section + questions
   const requests: object[] = [
     {
       updateSettings: {
@@ -178,41 +203,25 @@ async function createGoogleFormQuiz(
 
   let currentIndex = 0;
 
-  // Add "Email" text field
-  requests.push({
-    createItem: {
-      item: {
-        title: "Email",
-        questionItem: {
-          question: {
-            required: true,
-            textQuestion: {
-              paragraph: false,
+  // Add custom fields (e.g. Email, Nama Lengkap)
+  for (const fieldName of customFields) {
+    requests.push({
+      createItem: {
+        item: {
+          title: fieldName,
+          questionItem: {
+            question: {
+              required: true,
+              textQuestion: {
+                paragraph: false,
+              },
             },
           },
         },
+        location: { index: currentIndex++ },
       },
-      location: { index: currentIndex++ },
-    },
-  });
-
-  // Add "Nama Lengkap" text field
-  requests.push({
-    createItem: {
-      item: {
-        title: "Nama Lengkap",
-        questionItem: {
-          question: {
-            required: true,
-            textQuestion: {
-              paragraph: false,
-            },
-          },
-        },
-      },
-      location: { index: currentIndex++ },
-    },
-  });
+    });
+  }
 
   // Add section header before quiz questions
   requests.push({

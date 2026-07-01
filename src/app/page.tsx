@@ -21,6 +21,8 @@ export default function Home() {
   const { data: session, status } = useSession();
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState("");
+  const [subtitle, setSubtitle] = useState("");
+  const [customFields, setCustomFields] = useState("Email, Nama Lengkap");
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState("");
   const [result, setResult] = useState<GenerateResult | null>(null);
@@ -59,6 +61,8 @@ export default function Home() {
       const formData = new FormData();
       formData.append("file", file);
       formData.append("title", title || file.name.replace(".docx", ""));
+      formData.append("subtitle", subtitle);
+      formData.append("customFields", customFields);
 
       setProgress("Parsing document...");
 
@@ -313,6 +317,43 @@ export default function Home() {
                   placeholder="e.g., Pre-Test Module 1"
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 />
+              </div>
+
+              {/* Subtitle */}
+              <div className="space-y-2">
+                <label
+                  htmlFor="subtitle"
+                  className="block text-sm font-medium text-gray-700"
+                >
+                  Sub Judul (opsional)
+                </label>
+                <input
+                  id="subtitle"
+                  type="text"
+                  value={subtitle}
+                  onChange={(e) => setSubtitle(e.target.value)}
+                  placeholder="e.g., PT Gama Semesta Konsultindo"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+              </div>
+
+              {/* Custom Fields */}
+              <div className="space-y-2">
+                <label
+                  htmlFor="customFields"
+                  className="block text-sm font-medium text-gray-700"
+                >
+                  Field Tambahan (pisah dengan koma)
+                </label>
+                <input
+                  id="customFields"
+                  type="text"
+                  value={customFields}
+                  onChange={(e) => setCustomFields(e.target.value)}
+                  placeholder="e.g., Email, Nama Lengkap, NIP"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+                <p className="text-xs text-gray-500">Field ini akan muncul sebelum soal di Google Form</p>
               </div>
 
               {/* File upload */}
