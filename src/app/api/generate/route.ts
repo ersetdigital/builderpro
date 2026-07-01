@@ -154,14 +154,20 @@ async function createGoogleFormQuiz(
               required: true,
               choiceQuestion: {
                 type: "RADIO",
-                options: item.opsi.map((opsiText) => ({ value: opsiText })),
+                options: item.opsi.map((opsiText, opsiIdx) => ({
+                  value: `${String.fromCharCode(65 + opsiIdx)}. ${opsiText}`,
+                })),
               },
               grading:
                 item.jawabanIndex !== undefined
                   ? {
                       pointValue: 1,
                       correctAnswers: {
-                        answers: [{ value: item.opsi[item.jawabanIndex] }],
+                        answers: [
+                          {
+                            value: `${String.fromCharCode(65 + item.jawabanIndex)}. ${item.opsi[item.jawabanIndex]}`,
+                          },
+                        ],
                       },
                     }
                   : undefined,
