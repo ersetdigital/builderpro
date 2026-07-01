@@ -957,3 +957,38 @@ export async function parseQuizDocx(buffer: Buffer): Promise<QuizItem[]> {
   const paragraphs = await parseDocxViaXml(buffer);
   return buildQuizFromParagraphs(paragraphs);
 }
+
+
+/**
+ * Debug function: dump raw rPr info for each paragraph's first run.
+ * Helps identify WHY bold detection fails for certain paragraphs.
+ */
+export async function parseDocxRawDebug(buffer: Buffer): Promise<{ text: string; rPrKeys: string }[]> {
+  const { documentObj } = await loadDocxXml(buffer);
+  const paragraphs = extractParagraphs(documentObj);
+  const result: { text: string; rPrKeys: string }[] = [];
+
+  for (const p of paragraphs) {
+    const runs = toArray(p["w:r"]);
+    const segments = extractParagraphSegments(p);
+    const text = segments.map(s => s.text).join("").substring(0, 80);
+    
+    if (!text) continue;
+
+    // Dump all rPr keys from all runs
+    const rPrInfos: string[] = [];
+    for (const run of runs) {
+      const rPr = run["w:rPr"];
+      if (rPr) {
+        const keys = Object.keys(rPr).join(",");
+        rPrInfos.push(keys);
+      } else {
+        rPrInfos.push("(no-rPr)");
+      }
+    }
+
+    result.push({ text, rPrKeys: rPrInfos.join(" | ") });
+  }
+
+  return result;
+}

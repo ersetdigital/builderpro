@@ -48,19 +48,26 @@ export async function POST(request: NextRequest) {
     const buffer = Buffer.from(arrayBuffer);
 
     let items: QuizItem[];
-    let debugParagraphs: { text: string; role: string; numId: number | null; ilvl: number | null; numFormat: string | null; isBold: boolean }[] = [];
+    let debugParagraphs: { text: string; role: string; numId: number | null; ilvl: number | null; numFormat: string | null; isBold: boolean; rawBoldInfo?: string }[] = [];
     try {
-      const { parseDocxViaXml, buildQuizFromParagraphs } = await import("@/lib/docx-numbering-parser");
+      const { parseDocxViaXml, buildQuizFromParagraphs, parseDocxRawDebug } = await import("@/lib/docx-numbering-parser");
       const paragraphs = await parseDocxViaXml(buffer);
       
+      // Get raw debug info for bold analysis
+      let rawDebug: { text: string; rPrKeys: string }[] = [];
+      try {
+        rawDebug = await parseDocxRawDebug(buffer);
+      } catch { /* ignore */ }
+      
       // Build debug info (show first 50 paragraphs with longer text)
-      debugParagraphs = paragraphs.slice(0, 50).map((p) => ({
+      debugParagraphs = paragraphs.slice(0, 50).map((p, idx) => ({
         text: p.text.substring(0, 120),
         role: "pending",
         numId: p.numId,
         ilvl: p.ilvl,
         numFormat: p.numFormat,
         isBold: p.isBold,
+        rawBoldInfo: rawDebug[idx]?.rPrKeys || undefined,
       }));
       
       items = buildQuizFromParagraphs(paragraphs);
