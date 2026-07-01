@@ -298,7 +298,7 @@ function extractParagraphText(p: any): { text: string; isBold: boolean } {
     if (isRunBold) boldRunCount++;
   }
 
-  const isBold = textRunCount > 0 && boldRunCount === textRunCount;
+  const isBold = textRunCount > 0 && boldRunCount >= Math.ceil(textRunCount * 0.5);
   return { text: combinedText.trim(), isBold };
 }
 
@@ -457,11 +457,12 @@ function flushChunksToSegment(chunks: { text: string; isBold: boolean }[]): { te
   const combinedText = chunks.map(c => c.text).join("").trim();
   if (!combinedText) return null;
   
-  // A segment is bold if ALL its text-bearing chunks are bold
+  // A segment is bold if majority (>=50%) of its text-bearing chunks are bold
   const textChunks = chunks.filter(c => c.text.trim());
-  const allBold = textChunks.length > 0 && textChunks.every(c => c.isBold);
+  const boldChunks = textChunks.filter(c => c.isBold);
+  const isBold = textChunks.length > 0 && boldChunks.length >= Math.ceil(textChunks.length * 0.5);
   
-  return { text: combinedText, isBold: allBold };
+  return { text: combinedText, isBold };
 }
 
 /**
