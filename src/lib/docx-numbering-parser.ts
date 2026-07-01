@@ -163,7 +163,47 @@ function toArray<T>(val: T | T[] | undefined | null): T[] {
 function extractParagraphs(documentObj: any): any[] {
   const body = documentObj?.["w:document"]?.["w:body"];
   if (!body) return [];
-  return toArray(body["w:p"]);
+  
+  // Collect paragraphs from top-level and from nested structures (sdt, tbl, tc, etc.)
+  const result: any[] = [];
+  collectParagraphs(body, result);
+  return result;
+}
+
+/**
+ * Recursively collect all <w:p> elements from the document body,
+ * including those nested inside <w:sdt>, <w:tbl>, <w:tc>, etc.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function collectParagraphs(node: any, result: any[]): void {
+  if (!node || typeof node !== "object") return;
+
+  // Direct paragraphs
+  const ps = toArray(node["w:p"]);
+  for (const p of ps) {
+    result.push(p);
+  }
+
+  // Paragraphs inside structured document tags (w:sdt -> w:sdtContent)
+  const sdts = toArray(node["w:sdt"]);
+  for (const sdt of sdts) {
+    const sdtContent = sdt?.["w:sdtContent"];
+    if (sdtContent) {
+      collectParagraphs(sdtContent, result);
+    }
+  }
+
+  // Paragraphs inside tables (w:tbl -> w:tr -> w:tc -> w:p)
+  const tbls = toArray(node["w:tbl"]);
+  for (const tbl of tbls) {
+    const trs = toArray(tbl["w:tr"]);
+    for (const tr of trs) {
+      const tcs = toArray(tr["w:tc"]);
+      for (const tc of tcs) {
+        collectParagraphs(tc, result);
+      }
+    }
+  }
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -209,6 +249,126 @@ function extractParagraphText(p: any): { text: string; isBold: boolean } {
   return { text: combinedText.trim(), isBold };
 }
 
+/**
+ * Extract multiple text segments from a single paragraph, splitting on <w:br/> (soft line breaks).
+ * Each segment gets its own bold status.
+ * This handles the case where options A/B/C/D are separated by Shift+Enter within one <w:p>.
+ *
+ * Also handles the case where <w:br/> is a direct child of <w:p> (between runs).
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function extractParagraphSegments(p: any): { text: string; isBold: boolean }[] {
+  // Collect all runs including those inside w:hyperlink
+  let runs = toArray(p["w:r"]);
+  const hyperlinks = toArray(p["w:hyperlink"]);
+  for (const hl of hyperlinks) {
+    runs = runs.concat(toArray(hl["w:r"]));
+  }
+  
+  if (runs.length === 0) {
+    return [];
+  }
+
+  // We build segments separated by <w:br/> within runs
+  const segments: { text: string; isBold: boolean }[] = [];
+  let currentText = "";
+  let currentBoldRuns = 0;
+  let currentTextRuns = 0;
+
+  for (const run of runs) {
+    // Check if run contains a <w:br/> element (line break)
+    const brNode = run["w:br"];
+    const hasBr = brNode !== undefined;
+
+    // A run can have BOTH text and a br, or just br, or just text
+    // Also, in some XML structures, the run's children are ordered:
+    // sometimes br comes before text, sometimes after.
+    // We handle: if br exists, flush current segment first, then process text.
+
+    if (hasBr) {
+      // Flush current segment
+      if (currentText.trim()) {
+        segments.push({
+          text: currentText.trim(),
+          isBold: currentTextRuns > 0 && currentBoldRuns === currentTextRuns,
+        });
+      }
+      currentText = "";
+      currentBoldRuns = 0;
+      currentTextRuns = 0;
+    }
+
+    const tNode = run["w:t"];
+    if (tNode === undefined) continue;
+
+    let runText = "";
+    if (typeof tNode === "string") {
+      runText = tNode;
+    } else if (typeof tNode === "number") {
+      runText = String(tNode);
+    } else if (Array.isArray(tNode)) {
+      // Multiple <w:t> elements in one run
+      for (const t of tNode) {
+        if (typeof t === "string") runText += t;
+        else if (typeof t === "number") runText += String(t);
+        else if (t && typeof t === "object" && t["#text"] !== undefined) runText += String(t["#text"]);
+      }
+    } else if (tNode && typeof tNode === "object" && tNode["#text"] !== undefined) {
+      runText = String(tNode["#text"]);
+    }
+
+    if (runText === "") continue;
+
+    currentTextRuns++;
+    currentText += runText;
+
+    const rPr = run["w:rPr"];
+    const bNode = rPr?.["w:b"];
+    const isRunBold =
+      bNode !== undefined &&
+      bNode?.["@_w:val"] !== "0" &&
+      bNode?.["@_w:val"] !== "false";
+
+    if (isRunBold) currentBoldRuns++;
+  }
+
+  // Flush last segment
+  if (currentText.trim()) {
+    segments.push({
+      text: currentText.trim(),
+      isBold: currentTextRuns > 0 && currentBoldRuns === currentTextRuns,
+    });
+  }
+
+  // If we only got 1 segment but it contains multiple "A. ... B. ... C. ... D. ..." patterns,
+  // split it further using regex (handles case where br is missing but text was concatenated)
+  if (segments.length === 1) {
+    const split = splitConcatenatedOptions(segments[0].text, segments[0].isBold);
+    if (split.length > 1) return split;
+  }
+
+  return segments;
+}
+
+/**
+ * Split a single text that may contain concatenated options like:
+ * "A. Radiasi matahari pada dindingB. Perubahan kandungan uap air udara"
+ * into separate segments.
+ */
+function splitConcatenatedOptions(text: string, defaultBold: boolean): { text: string; isBold: boolean }[] {
+  // Pattern: look for option markers (A. B. C. D.) within the text
+  // Split on boundaries where a new option starts
+  const splitPattern = /(?=[A-D]\.\s)/g;
+  const parts = text.split(splitPattern).filter((s) => s.trim());
+  
+  if (parts.length <= 1) return [{ text, isBold: defaultBold }];
+  
+  return parts.map((part) => ({
+    text: part.trim(),
+    isBold: defaultBold, // inherit bold from the original — not perfect but best we can do
+  }));
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function extractNumbering(p: any): {
   numId: number | null;
@@ -251,9 +411,6 @@ export async function parseDocxViaXml(
   const result: ParsedParagraph[] = [];
 
   for (const p of paragraphs) {
-    const { text, isBold } = extractParagraphText(p);
-    if (!text) continue;
-
     const { numId, ilvl } = extractNumbering(p);
 
     let hasStyleNumbering = false;
@@ -270,7 +427,30 @@ export async function parseDocxViaXml(
       numFormat = numberingFormatMap.get(`${numId}:${ilvl}`) || null;
     }
 
-    result.push({ text, isBold, numId, ilvl, hasStyleNumbering, numFormat });
+    // Extract segments (handles soft line breaks within a paragraph)
+    const segments = extractParagraphSegments(p);
+
+    if (segments.length === 0) continue;
+
+    // If there's only 1 segment, treat as normal paragraph
+    if (segments.length === 1) {
+      const seg = segments[0];
+      if (!seg.text) continue;
+      result.push({ text: seg.text, isBold: seg.isBold, numId, ilvl, hasStyleNumbering, numFormat });
+    } else {
+      // Multiple segments from soft line breaks — each becomes its own ParsedParagraph
+      // The first segment inherits the paragraph's numbering info
+      // Subsequent segments get numId=null (they're sub-lines, classified by regex)
+      for (let i = 0; i < segments.length; i++) {
+        const seg = segments[i];
+        if (!seg.text) continue;
+        if (i === 0) {
+          result.push({ text: seg.text, isBold: seg.isBold, numId, ilvl, hasStyleNumbering, numFormat });
+        } else {
+          result.push({ text: seg.text, isBold: seg.isBold, numId: null, ilvl: null, hasStyleNumbering: false, numFormat: null });
+        }
+      }
+    }
   }
 
   return result;

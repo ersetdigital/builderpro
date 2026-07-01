@@ -53,9 +53,9 @@ export async function POST(request: NextRequest) {
       const { parseDocxViaXml, buildQuizFromParagraphs } = await import("@/lib/docx-numbering-parser");
       const paragraphs = await parseDocxViaXml(buffer);
       
-      // Build debug info
-      debugParagraphs = paragraphs.slice(0, 30).map((p) => ({
-        text: p.text.substring(0, 80),
+      // Build debug info (show first 50 paragraphs with longer text)
+      debugParagraphs = paragraphs.slice(0, 50).map((p) => ({
+        text: p.text.substring(0, 120),
         role: "pending",
         numId: p.numId,
         ilvl: p.ilvl,
