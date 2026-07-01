@@ -195,19 +195,9 @@ function checkRunBold(rPr: any): boolean {
     return true;
   }
 
-  // Check <w:bCs/> (bold complex script)
-  const bCsNode = rPr["w:bCs"];
-  if (bCsNode !== undefined) {
-    if (bCsNode === "" || bCsNode === null || bCsNode === true) return true;
-    if (typeof bCsNode === "object") {
-      const val = bCsNode["@_w:val"];
-      if (val === undefined) return true;
-      if (val === "1" || val === "true" || val === true) return true;
-      if (val === "0" || val === "false" || val === false) return false;
-      return true;
-    }
-    return true;
-  }
+  // NOTE: Do NOT check <w:bCs/> (bold complex script) — this is used for
+  // bidirectional/complex script text and does NOT represent visual bold
+  // that the user sees. Only <w:b/> represents actual visual bold.
 
   return false;
 }
@@ -270,6 +260,9 @@ function extractParagraphText(p: any): { text: string; isBold: boolean } {
   let boldRunCount = 0;
   let textRunCount = 0;
 
+  let boldCharCount = 0;
+  let totalCharCount = 0;
+
   for (const run of runs) {
     const tNode = run["w:t"];
     if (tNode === undefined) continue;
@@ -291,10 +284,16 @@ function extractParagraphText(p: any): { text: string; isBold: boolean } {
     const rPr = run["w:rPr"];
     const isRunBold = checkRunBold(rPr);
 
+    // Count characters for more accurate bold detection
+    const charCount = runText.replace(/\s/g, "").length;
+    totalCharCount += charCount;
+    if (isRunBold) boldCharCount += charCount;
+
     if (isRunBold) boldRunCount++;
   }
 
-  const isBold = textRunCount > 0 && boldRunCount >= Math.ceil(textRunCount * 0.5);
+  // Bold if more than 70% of non-space characters are in bold runs
+  const isBold = totalCharCount > 0 && boldCharCount > totalCharCount * 0.7;
   return { text: combinedText.trim(), isBold };
 }
 
@@ -449,10 +448,15 @@ function flushChunksToSegment(chunks: { text: string; isBold: boolean }[]): { te
   const combinedText = chunks.map(c => c.text).join("").trim();
   if (!combinedText) return null;
   
-  // A segment is bold if majority (>=50%) of its text-bearing chunks are bold
-  const textChunks = chunks.filter(c => c.text.trim());
-  const boldChunks = textChunks.filter(c => c.isBold);
-  const isBold = textChunks.length > 0 && boldChunks.length >= Math.ceil(textChunks.length * 0.5);
+  // Bold if more than 70% of non-space characters are in bold chunks
+  let totalChars = 0;
+  let boldChars = 0;
+  for (const c of chunks) {
+    const charCount = c.text.replace(/\s/g, "").length;
+    totalChars += charCount;
+    if (c.isBold) boldChars += charCount;
+  }
+  const isBold = totalChars > 0 && boldChars > totalChars * 0.7;
   
   return { text: combinedText, isBold };
 }
