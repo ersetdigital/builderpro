@@ -164,21 +164,67 @@ async function createGoogleFormQuiz(
 
   const formId = createRes.data.formId!;
 
-  // Step 2: Enable quiz mode + add questions
+  // Step 2: Enable quiz mode + collect email + add questions
   const requests: object[] = [
     {
       updateSettings: {
-        settings: { quizSettings: { isQuiz: true } },
+        settings: { 
+          quizSettings: { isQuiz: true },
+        },
         updateMask: "quizSettings.isQuiz",
+      },
+    },
+    // Enable email collection
+    {
+      updateSettings: {
+        settings: {
+          formSettings: {
+            collectEmail: true,
+          },
+        },
+        updateMask: "formSettings.collectEmail",
       },
     },
   ];
 
-  items.forEach((item, index) => {
+  let currentIndex = 0;
+
+  // Add "Nama Lengkap" text field as first question
+  requests.push({
+    createItem: {
+      item: {
+        title: "Nama Lengkap",
+        questionItem: {
+          question: {
+            required: true,
+            textQuestion: {
+              paragraph: false,
+            },
+          },
+        },
+      },
+      location: { index: currentIndex++ },
+    },
+  });
+
+  // Add section header before quiz questions
+  requests.push({
+    createItem: {
+      item: {
+        title: "Soal Pilihan Ganda",
+        description: "Pilihlah salah satu jawaban yang paling tepat!",
+        pageBreakItem: {},
+      },
+      location: { index: currentIndex++ },
+    },
+  });
+
+  // Add quiz questions
+  items.forEach((item, idx) => {
     requests.push({
       createItem: {
         item: {
-          title: `${index + 1}. ${item.soal}`,
+          title: `${idx + 1}. ${item.soal}`,
           questionItem: {
             question: {
               required: true,
@@ -204,7 +250,7 @@ async function createGoogleFormQuiz(
             },
           },
         },
-        location: { index },
+        location: { index: currentIndex++ },
       },
     });
   });
