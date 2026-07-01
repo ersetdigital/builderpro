@@ -269,33 +269,17 @@ function extractParagraphSegments(p: any): { text: string; isBold: boolean }[] {
     return [];
   }
 
-  // We build segments separated by <w:br/> within runs
-  const segments: { text: string; isBold: boolean }[] = [];
-  let currentText = "";
-  let currentBoldRuns = 0;
-  let currentTextRuns = 0;
+  // First pass: build an array of "chunks" with text + bold + isBr flag
+  // This preserves per-run bold info for later splitting
+  const chunks: { text: string; isBold: boolean; isBr: boolean }[] = [];
 
   for (const run of runs) {
     // Check if run contains a <w:br/> element (line break)
     const brNode = run["w:br"];
     const hasBr = brNode !== undefined;
 
-    // A run can have BOTH text and a br, or just br, or just text
-    // Also, in some XML structures, the run's children are ordered:
-    // sometimes br comes before text, sometimes after.
-    // We handle: if br exists, flush current segment first, then process text.
-
     if (hasBr) {
-      // Flush current segment
-      if (currentText.trim()) {
-        segments.push({
-          text: currentText.trim(),
-          isBold: currentTextRuns > 0 && currentBoldRuns === currentTextRuns,
-        });
-      }
-      currentText = "";
-      currentBoldRuns = 0;
-      currentTextRuns = 0;
+      chunks.push({ text: "", isBold: false, isBr: true });
     }
 
     const tNode = run["w:t"];
@@ -307,7 +291,6 @@ function extractParagraphSegments(p: any): { text: string; isBold: boolean }[] {
     } else if (typeof tNode === "number") {
       runText = String(tNode);
     } else if (Array.isArray(tNode)) {
-      // Multiple <w:t> elements in one run
       for (const t of tNode) {
         if (typeof t === "string") runText += t;
         else if (typeof t === "number") runText += String(t);
@@ -319,9 +302,6 @@ function extractParagraphSegments(p: any): { text: string; isBold: boolean }[] {
 
     if (runText === "") continue;
 
-    currentTextRuns++;
-    currentText += runText;
-
     const rPr = run["w:rPr"];
     const bNode = rPr?.["w:b"];
     const isRunBold =
@@ -329,35 +309,110 @@ function extractParagraphSegments(p: any): { text: string; isBold: boolean }[] {
       bNode?.["@_w:val"] !== "0" &&
       bNode?.["@_w:val"] !== "false";
 
-    if (isRunBold) currentBoldRuns++;
+    chunks.push({ text: runText, isBold: isRunBold, isBr: false });
   }
 
-  // Flush last segment
-  if (currentText.trim()) {
-    segments.push({
-      text: currentText.trim(),
-      isBold: currentTextRuns > 0 && currentBoldRuns === currentTextRuns,
-    });
+  // Second pass: split chunks into segments by <w:br/>
+  const segments: { text: string; isBold: boolean }[] = [];
+  let segChunks: { text: string; isBold: boolean; isBr: boolean }[] = [];
+
+  for (const chunk of chunks) {
+    if (chunk.isBr) {
+      // Flush current segment
+      const seg = flushChunksToSegment(segChunks);
+      if (seg) segments.push(seg);
+      segChunks = [];
+    } else {
+      segChunks.push(chunk);
+    }
   }
+  // Flush last segment
+  const lastSeg = flushChunksToSegment(segChunks);
+  if (lastSeg) segments.push(lastSeg);
 
   // If we only got 1 segment but it contains multiple "A. ... B. ... C. ... D. ..." patterns,
-  // split it further using regex (handles case where br is missing but text was concatenated)
+  // split it further using regex — but now with per-character bold tracking
   if (segments.length === 1) {
-    const split = splitConcatenatedOptions(segments[0].text, segments[0].isBold);
+    const textChunks = chunks.filter(c => !c.isBr);
+    const split = splitConcatenatedOptionsWithBold(textChunks);
     if (split.length > 1) return split;
   }
 
   return segments;
 }
 
+function flushChunksToSegment(chunks: { text: string; isBold: boolean }[]): { text: string; isBold: boolean } | null {
+  const combinedText = chunks.map(c => c.text).join("").trim();
+  if (!combinedText) return null;
+  
+  // A segment is bold if ALL its text-bearing chunks are bold
+  const textChunks = chunks.filter(c => c.text.trim());
+  const allBold = textChunks.length > 0 && textChunks.every(c => c.isBold);
+  
+  return { text: combinedText, isBold: allBold };
+}
+
 /**
- * Split a single text that may contain concatenated options like:
- * "A. Radiasi matahari pada dindingB. Perubahan kandungan uap air udara"
- * into separate segments.
+ * Split concatenated options like "A. Radiasi...B. Perubahan..." preserving per-option bold status.
+ * Uses the original chunks array to determine which option text was bold.
+ */
+function splitConcatenatedOptionsWithBold(chunks: { text: string; isBold: boolean }[]): { text: string; isBold: boolean }[] {
+  // Build full text with bold mapping per character
+  let fullText = "";
+  const boldMap: boolean[] = [];
+  
+  for (const chunk of chunks) {
+    for (let i = 0; i < chunk.text.length; i++) {
+      fullText += chunk.text[i];
+      boldMap.push(chunk.isBold);
+    }
+  }
+
+  // Split on option markers (A. B. C. D.)
+  const optionPattern = /[A-D]\.\s/g;
+  const matches: { index: number }[] = [];
+  let m;
+  while ((m = optionPattern.exec(fullText)) !== null) {
+    matches.push({ index: m.index });
+  }
+
+  if (matches.length < 2) return [];
+
+  const results: { text: string; isBold: boolean }[] = [];
+  
+  // Check if there's text before the first option marker (could be soal text)
+  if (matches[0].index > 0) {
+    const preText = fullText.substring(0, matches[0].index).trim();
+    if (preText) {
+      const preBold = boldMap.slice(0, matches[0].index).some(b => b) && 
+                      boldMap.slice(0, matches[0].index).filter((_, i) => fullText[i] !== " ").every(b => b);
+      results.push({ text: preText, isBold: preBold });
+    }
+  }
+
+  for (let i = 0; i < matches.length; i++) {
+    const start = matches[i].index;
+    const end = i + 1 < matches.length ? matches[i + 1].index : fullText.length;
+    const optText = fullText.substring(start, end).trim();
+    
+    if (!optText) continue;
+
+    // Determine bold: check if majority of non-space characters in this range are bold
+    const rangeBold = boldMap.slice(start, end);
+    const nonSpaceCount = optText.replace(/\s/g, "").length;
+    const boldCount = rangeBold.filter((b, idx) => b && fullText[start + idx] !== " ").length;
+    const isBold = nonSpaceCount > 0 && boldCount >= nonSpaceCount * 0.5;
+
+    results.push({ text: optText, isBold });
+  }
+
+  return results.length > 1 ? results : [];
+}
+
+/**
+ * Legacy split function (kept as final fallback when chunks aren't available)
  */
 function splitConcatenatedOptions(text: string, defaultBold: boolean): { text: string; isBold: boolean }[] {
-  // Pattern: look for option markers (A. B. C. D.) within the text
-  // Split on boundaries where a new option starts
   const splitPattern = /(?=[A-D]\.\s)/g;
   const parts = text.split(splitPattern).filter((s) => s.trim());
   
@@ -365,7 +420,7 @@ function splitConcatenatedOptions(text: string, defaultBold: boolean): { text: s
   
   return parts.map((part) => ({
     text: part.trim(),
-    isBold: defaultBold, // inherit bold from the original — not perfect but best we can do
+    isBold: defaultBold,
   }));
 }
 
