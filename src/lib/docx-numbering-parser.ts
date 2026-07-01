@@ -284,16 +284,25 @@ function extractParagraphText(p: any): { text: string; isBold: boolean } {
     const rPr = run["w:rPr"];
     const isRunBold = checkRunBold(rPr);
 
-    // Count characters for more accurate bold detection
-    const charCount = runText.replace(/\s/g, "").length;
-    totalCharCount += charCount;
-    if (isRunBold) boldCharCount += charCount;
+    // Count characters for bold detection, EXCLUDING option prefix runs (A. B. C. D.)
+    // These prefixes are often not bold even when the answer text is bold
+    const trimmedRun = runText.trim();
+    const isOptionPrefix = /^[A-Da-d]\.\s*$/.test(trimmedRun) || /^[A-Da-d]$/.test(trimmedRun) || /^\.\s*$/.test(trimmedRun);
+    
+    if (!isOptionPrefix) {
+      const charCount = runText.replace(/\s/g, "").length;
+      totalCharCount += charCount;
+      if (isRunBold) boldCharCount += charCount;
+    }
 
     if (isRunBold) boldRunCount++;
   }
 
-  // Bold if more than 70% of non-space characters are in bold runs
-  const isBold = totalCharCount > 0 && boldCharCount > totalCharCount * 0.7;
+  // Bold if more than 50% of non-prefix, non-space characters are in bold runs
+  // If no non-prefix chars found, fall back to run-based check
+  const isBold = totalCharCount > 0 
+    ? boldCharCount > totalCharCount * 0.5
+    : (textRunCount > 0 && boldRunCount === textRunCount);
   return { text: combinedText.trim(), isBold };
 }
 
@@ -448,15 +457,24 @@ function flushChunksToSegment(chunks: { text: string; isBold: boolean }[]): { te
   const combinedText = chunks.map(c => c.text).join("").trim();
   if (!combinedText) return null;
   
-  // Bold if more than 70% of non-space characters are in bold chunks
+  // Bold detection: exclude option prefix chunks (A. B. C. D.) from calculation
   let totalChars = 0;
   let boldChars = 0;
   for (const c of chunks) {
-    const charCount = c.text.replace(/\s/g, "").length;
-    totalChars += charCount;
-    if (c.isBold) boldChars += charCount;
+    const trimmed = c.text.trim();
+    const isPrefix = /^[A-Da-d]\.\s*$/.test(trimmed) || /^[A-Da-d]$/.test(trimmed) || /^\.\s*$/.test(trimmed);
+    if (!isPrefix) {
+      const charCount = c.text.replace(/\s/g, "").length;
+      totalChars += charCount;
+      if (c.isBold) boldChars += charCount;
+    }
   }
-  const isBold = totalChars > 0 && boldChars > totalChars * 0.7;
+  
+  // Bold if more than 50% of non-prefix characters are bold
+  const textChunks = chunks.filter(c => c.text.trim());
+  const isBold = totalChars > 0 
+    ? boldChars > totalChars * 0.5 
+    : (textChunks.length > 0 && textChunks.every(c => c.isBold));
   
   return { text: combinedText, isBold };
 }
