@@ -837,26 +837,10 @@ function determineBestAnswer(boldIndices: number[], soalBold: boolean): number |
   if (boldIndices.length === 1) return boldIndices[0];
   
   // If all 4 opsi are bold, we can't determine
-  // (threshold: if more than 3 are bold, it's probably all bold = no signal)
   if (boldIndices.length >= 4) return undefined;
-  
-  // If soal was bold and first opsi (index 0) is also bold, it might be spillover
-  if (soalBold && boldIndices[0] === 0) {
-    // Try to find a bold opsi that's NOT at index 0
-    const nonFirstBold = boldIndices.filter(i => i !== 0);
-    if (nonFirstBold.length === 1) {
-      // Exactly one other bold opsi besides index 0 → that's likely the real answer
-      return nonFirstBold[0];
-    }
-    if (nonFirstBold.length > 1) {
-      // Multiple non-first bold opsi — just use first non-zero one
-      return nonFirstBold[0];
-    }
-    // Only index 0 is bold — use it (it's the only signal we have)
-    return 0;
-  }
-  
-  // Soal not bold or first opsi not at index 0: use first bold opsi
+
+  // Multiple bold opsi: use the first one as answer
+  // (If customer accidentally bolds extra opsi, first bold is usually correct)
   return boldIndices[0];
 }
 
