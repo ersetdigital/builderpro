@@ -164,7 +164,7 @@ async function createGoogleFormQuiz(
 
   const formId = createRes.data.formId!;
 
-  // Step 2: Enable quiz mode + collect email + add questions
+  // Step 2: Enable quiz mode + add questions
   const requests: object[] = [
     {
       updateSettings: {
@@ -174,22 +174,29 @@ async function createGoogleFormQuiz(
         updateMask: "quizSettings.isQuiz",
       },
     },
-    // Enable email collection
-    {
-      updateSettings: {
-        settings: {
-          formSettings: {
-            collectEmail: true,
-          },
-        },
-        updateMask: "formSettings.collectEmail",
-      },
-    },
   ];
 
   let currentIndex = 0;
 
-  // Add "Nama Lengkap" text field as first question
+  // Add "Email" text field
+  requests.push({
+    createItem: {
+      item: {
+        title: "Email",
+        questionItem: {
+          question: {
+            required: true,
+            textQuestion: {
+              paragraph: false,
+            },
+          },
+        },
+      },
+      location: { index: currentIndex++ },
+    },
+  });
+
+  // Add "Nama Lengkap" text field
   requests.push({
     createItem: {
       item: {
