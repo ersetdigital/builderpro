@@ -148,7 +148,7 @@ async function createGoogleFormQuiz(
     requests.push({
       createItem: {
         item: {
-          title: item.soal,
+          title: `${index + 1}. ${item.soal}`,
           questionItem: {
             question: {
               required: true,
