@@ -56,6 +56,8 @@ async function loadDocxXml(buffer: Buffer) {
     ignoreAttributes: false,
     attributeNamePrefix: "@_",
     preserveOrder: false,
+    trimValues: false,
+    parseTagValue: false,
   });
 
   const documentObj = parser.parse(documentXml);
@@ -114,12 +116,14 @@ function extractParagraphText(p: any): { text: string; isBold: boolean } {
     const tNode = run["w:t"];
     if (tNode === undefined) continue;
 
-    const runText =
-      typeof tNode === "string"
-        ? tNode
-        : tNode?.["#text"] !== undefined
-          ? String(tNode["#text"])
-          : "";
+    let runText = "";
+    if (typeof tNode === "string") {
+      runText = tNode;
+    } else if (typeof tNode === "number") {
+      runText = String(tNode);
+    } else if (tNode && typeof tNode === "object" && tNode["#text"] !== undefined) {
+      runText = String(tNode["#text"]);
+    }
 
     if (runText === "") continue;
 
@@ -207,13 +211,13 @@ type Role = "soal" | "opsi" | "ignore";
 const SOAL_PATTERNS: RegExp[] = [
   /^\s*soal\s*[:.\-]?\s*\d+\s*[:.\-]?\s*/i,
   /^\s*no\.?\s*\d+\s*[:.\-]?\s*/i,
-  /^\s*\d+\s*[.)\-:]\s+/,
+  /^\s*\d+\s*[.)\-:]\s*/,
 ];
 
 const OPSI_PATTERNS: RegExp[] = [
-  /^\s*[A-Da-d]\s*[.)\-:]\s+/,
+  /^\s*[A-Da-d]\s*[.)\-:]\s*/,
   /^\s*\(([A-Da-d])\)\s*/,
-  /^\s*[ivx]{1,4}\s*[.)]\s+/i,
+  /^\s*[ivx]{1,4}\s*[.)]\s*/i,
   /^\s*[•▪●\-*]\s+/,
 ];
 
