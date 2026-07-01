@@ -30,8 +30,8 @@ export default function Home() {
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selected = e.target.files?.[0];
     if (selected) {
-      if (selected.size > 10 * 1024 * 1024) {
-        setError("File size exceeds the 10 MB limit.");
+      if (selected.size > 50 * 1024 * 1024) {
+        setError("File size exceeds the 50 MB limit.");
         setFile(null);
         return;
       }
@@ -372,7 +372,7 @@ export default function Home() {
                         Click to select a file or drag & drop
                       </p>
                       <p className="text-xs text-gray-400">
-                        .docx files up to 10 MB
+                        .docx files up to 50 MB
                       </p>
                     </div>
                   )}

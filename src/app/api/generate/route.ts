@@ -3,7 +3,7 @@ import { auth } from "@/lib/auth";
 import { google } from "googleapis";
 import { QuizItem } from "@/lib/docx-numbering-parser";
 
-const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
 
 export async function POST(request: NextRequest) {
   try {
@@ -38,7 +38,7 @@ export async function POST(request: NextRequest) {
     // Validate file size
     if (file.size > MAX_FILE_SIZE) {
       return NextResponse.json(
-        { error: "File size exceeds the 10 MB limit." },
+        { error: "File size exceeds the 50 MB limit." },
         { status: 400 }
       );
     }
